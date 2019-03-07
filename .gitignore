@@ -1,3 +1,8 @@
+*train_*
+*saved_models*
+research/object_detection/protos/*.py
+
+
 #.idea
 *.iml
 
