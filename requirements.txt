@@ -1,0 +1,6 @@
+Cython==0.29.6
+ipython==7.3.0
+ipython-genutils==0.2.0
+matplotlib==3.0.3
+numpy==1.16.2
+Pillow==5.4.1

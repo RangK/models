@@ -1,9 +1,11 @@
-FROM tensorflow/tensorflow:latest-gpu-py3
+FROM tensorflow/tensorflow:1.9.0-gpu-py3
 
 RUN git clone --depth 1 https://github.com/RangK/models.git && \
     mv models /tensorflow/models
 
 RUN apt-get install -y protobuf-compiler python-pil python-lxml python-tk
+
+
 
 RUN git clone --depth 1 https://github.com/cocodataset/cocoapi.git && \
     cd cocoapi/PythonAPI && \
@@ -26,6 +28,8 @@ ENV PYTHONPATH $PYTHONPATH:/tensorflow/models/research:/tensorflow/models/resear
 # Install wget (to make life easier below) and editors (to allow people to edit
 # the files inside the container)
 RUN apt-get install -y wget vim
+
+WORKDIR /tensorflow
 
 
 
