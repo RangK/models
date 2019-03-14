@@ -184,7 +184,7 @@ def unstack_batch(tensor_dict, unpad_groundtruth_tensors=True):
   return unbatched_tensor_dict
 
 
-def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
+def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_multi_gpus=False):
   """Creates a model function for `Estimator`.
 
   Args:
