@@ -50,7 +50,5 @@ ENV TRAIN_MODEL_DIR "./train_model"
 ENV PIPELINE_PATH "./train_model/pipeline.config"
 ENV VISIBLE_GPUS "0"
 
-CMD ["python", "./model_main.py", "--model_dir", "$TRAIN_MODEL_DIR", "--pipeline_config_path", "$PIPELINE_PATH", "--gpus", "$VISIBLE_GPUS"]
-
-
+CMD python ./model_main.py --model_dir $TRAIN_MODEL_DIR --pipeline_config_path $PIPELINE_PATH --gpus $VISIBLE_GPUS
 

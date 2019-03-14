@@ -1,0 +1,17 @@
+version: '2.3'
+services:
+  tf_models:
+    image: "yodj/tf_models:v2"
+    runtime: "nvidia"
+    environment:
+      - TRAIN_MODEL_DIR=train_faster_rcnn_nas_class_7
+      - PIPELINE_PATH=train_faster_rcnn_nas_class_7/pipeline.config
+      - VISIBLE_GPUS=1,2
+    logging:
+      driver: 'json-file'
+      options:
+        max-size: '1G'
+    volumes:
+      - ./volumes/bbox_datasets:/tf/models/research/object_detection/data
+      - ./volumes/train_faster_rcnn_nas_class_7:/tf/models/research/object_detection/train_faster_rcnn_nas_class_7
+      - ./volumes/faster_rcnn_nas_coco_2018_01_28:/tf/models/research/object_detection/faster_rcnn_nas_coco_2018_01_28
