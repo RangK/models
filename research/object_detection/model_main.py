@@ -25,11 +25,6 @@ import tensorflow as tf
 from object_detection import model_hparams
 from object_detection import model_lib
 
-import os
-
-
-os.environ['CUDA_VISIBLE_DEVICES']="3"
-
 flags.DEFINE_string(
     'model_dir', None, 'Path to output model directory '
     'where event and checkpoint files will be written.')
@@ -46,6 +41,7 @@ flags.DEFINE_integer('sample_1_of_n_eval_on_train_examples', 5, 'Will sample '
                      'one of every n train input examples for evaluation, '
                      'where n is provided. This is only used if '
                      '`eval_training_data` is True.')
+
 flags.DEFINE_string(
     'hparams_overrides', None, 'Hyperparameter overrides, '
     'represented as a string containing comma-separated '
@@ -58,13 +54,29 @@ flags.DEFINE_boolean(
     'run_once', False, 'If running in eval-only mode, whether to run just '
     'one round of eval vs running continuously (default).'
 )
+flags.DEFINE_string('gpus', '0', "How many GPUs do i need to train or evaluate it")
+
 FLAGS = flags.FLAGS
 
 
 def main(unused_argv):
+  import os
+  os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpus
+  gpus = FLAGS.gpus.split(",")
+
   flags.mark_flag_as_required('model_dir')
   flags.mark_flag_as_required('pipeline_config_path')
-  config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir)
+
+  if len(gpus) > 1:
+    print("using gpus for distributed training : {}".format(FLAGS.gpus))
+    # TODO : MirroredStrategy
+    # distribution = tf.contrib.distribute.MirroredStrategy(num_gpus=len(gpus))
+    # config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir, train_distribute=distribution)
+    config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir)
+    use_mgpus = True
+  else:
+    config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir)
+    use_mgpus = False
 
   train_and_eval_dict = model_lib.create_estimator_and_inputs(
       run_config=config,
@@ -73,7 +85,9 @@ def main(unused_argv):
       train_steps=FLAGS.num_train_steps,
       sample_1_of_n_eval_examples=FLAGS.sample_1_of_n_eval_examples,
       sample_1_of_n_eval_on_train_examples=(
-          FLAGS.sample_1_of_n_eval_on_train_examples))
+          FLAGS.sample_1_of_n_eval_on_train_examples),
+      use_mgpus=use_mgpus)
+
   estimator = train_and_eval_dict['estimator']
   train_input_fn = train_and_eval_dict['train_input_fn']
   eval_input_fns = train_and_eval_dict['eval_input_fns']

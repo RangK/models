@@ -342,6 +342,10 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False):
       training_optimizer, optimizer_summary_vars = optimizer_builder.build(
           train_config.optimizer)
 
+      if use_multi_gpus and mode is tf.estimator.ModeKeys.TRAIN:
+        print("TowerOptimizer : {}".format(True))
+        training_optimizer = tf.contrib.estimator.TowerOptimizer(training_optimizer)
+
     if mode == tf.estimator.ModeKeys.TRAIN:
       if use_tpu:
         training_optimizer = tf.contrib.tpu.CrossShardOptimizer(
@@ -497,6 +501,7 @@ def create_estimator_and_inputs(run_config,
                                 model_fn_creator=create_model_fn,
                                 use_tpu_estimator=False,
                                 use_tpu=False,
+                                use_mgpus=False,
                                 num_shards=1,
                                 params=None,
                                 override_eval_num_epochs=True,
@@ -615,13 +620,15 @@ def create_estimator_and_inputs(run_config,
       eval_config=eval_config,
       eval_input_config=eval_on_train_input_config,
       model_config=model_config)
+
   predict_input_fn = create_predict_input_fn(
       model_config=model_config, predict_input_config=eval_input_configs[0])
 
   export_to_tpu = hparams.get('export_to_tpu', False)
   tf.logging.info('create_estimator_and_inputs: use_tpu %s, export_to_tpu %s',
                   use_tpu, export_to_tpu)
-  model_fn = model_fn_creator(detection_model_fn, configs, hparams, use_tpu)
+  model_fn = model_fn_creator(detection_model_fn, configs, hparams, use_tpu,
+                              use_multi_gpus=use_mgpus)
   if use_tpu_estimator:
     estimator = tf.contrib.tpu.TPUEstimator(
         model_fn=model_fn,
@@ -633,7 +640,12 @@ def create_estimator_and_inputs(run_config,
         # TODO(lzc): Remove conditional after CMLE moves to TF 1.9
         params=params if params else {})
   else:
-    estimator = tf.estimator.Estimator(model_fn=model_fn, config=run_config)
+    if use_mgpus:
+      print("model fn is replicated")
+      model_fn = tf.contrib.estimator.replicate_model_fn(model_fn)
+
+    estimator = tf.estimator.Estimator(model_fn=model_fn,
+                                       config=run_config)
 
   # Write the as-run pipeline config to disk.
   if run_config.is_chief and save_final_config:
