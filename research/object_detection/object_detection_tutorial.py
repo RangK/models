@@ -8,6 +8,8 @@ from PIL import Image
 from utils import label_map_util
 from utils import visualization_utils as vis_util
 import cv2
+
+os.environ['CUDA_VISIBLE_DEVICES'] = "3"
 # This is needed since the notebook is stored in the object_detection folder.
 sys.path.append("..")
 from object_detection.utils import ops as utils_ops
@@ -15,13 +17,11 @@ from object_detection.utils import ops as utils_ops
 if StrictVersion(tf.__version__) < StrictVersion('1.9.0'):
  raise ImportError('Please upgrade your TensorFlow installation to v1.9.* or later!')
 
-os.environ['CUDA_VISIBLE_DEVICES'] = "0"
-
-MODEL_NAME = 'faster_rcnn_resnet50_coco_2018_01_28'
+MODEL_NAME = 'faster_rcnn_nas_0303_wfs'
 # MODEL_NAME = "faster_rcnn_nas_coco_2018_01_28"
 
 PATH_TO_CKPT = MODEL_NAME + '/frozen_inference_graph.pb'
-PATH_TO_LABELS = os.path.join('data', 'mscoco_label_map.pbtxt')
+PATH_TO_LABELS = os.path.join('data', 'wfs_label_map.pbtxt')
 NUM_CLASSES = 90
 
 detection_graph = tf.Graph()
@@ -41,26 +41,37 @@ def load_image_into_numpy_array(image):
  return np.array(image.getdata()).reshape(
   (im_height, im_width, 3)).astype(np.uint8)
 
+def read_image_path(root_dir):
+ return [os.path.join(root_dir, name) for name in os.listdir(root_dir)]
+
+def read_tests_from_xml(xml_dri):
+ return [name.replace(".xml", ".jpg") for name in os.listdir(xml_dri)]
 
 if __name__ == "__main__":
- video_path = "/home/storage_disk2/datasets/pangyo_pro/2th/starbucks/Starbucks_aveneufrance_front_door_1.MP4"
- cap = cv2.VideoCapture(video_path)
+ # video_path = "/home/storage_disk2/datasets/pangyo_pro/2th/starbucks/Starbucks_aveneufrance_front_door_1.MP4"
+ # cap = cv2.VideoCapture(video_path)
+ #
+ # if cap.isOpened():
+ #  nFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
- if cap.isOpened():
-  nFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
- total = nFrames
+ PATH_TO_TEST_IMAGES_DIR = '/home/storage_disk2/datasets/lcd/2th_0104/bbox_datasets/crop_pattern_images'
+ PATH_TO_XML_DIR = '/home/storage_disk2/datasets/lcd/2th_0104/bbox_datasets/xmls'
+ image_paths = read_image_path(PATH_TO_TEST_IMAGES_DIR)
+ tests = read_tests_from_xml(PATH_TO_XML_DIR)
+ total = nFrames = len(image_paths)
 
  with detection_graph.as_default():
   with tf.Session(graph=detection_graph) as sess:
-   while nFrames > 0:
-    print("{} / {}".format(total, nFrames), end="\r")
-    result, frame = cap.read()
-    if result is False:
+   for i, file_name in enumerate(image_paths):
+    print("{:03} / {:03}".format(total, nFrames), end="\r")
+    base_name = os.path.basename(file_name)
+    if base_name not in tests:
      continue
+
+    frame = cv2.imread(file_name)
 
     index = total - nFrames
     nFrames -= 1
-    base_name = "frame{:04d}.jpg".format(index)
 
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     image_np = np.array(rgb).astype(np.uint8)
@@ -76,20 +87,25 @@ if __name__ == "__main__":
      [boxes, scores, classes, num_detections], feed_dict={image_tensor: image_np_expanded}
     )
 
+    best_score = max(scores[0])
+    best_index = scores[0].index(best_score)
+
+    best_box = boxes[0][best_index]
+    best_class = classes[0][best_index].astype(np.uint8)
+
     vis_util.visualize_boxes_and_labels_on_image_array(
      image_np,
-     boxes[0],
-     classes[0].astype(np.uint8),
-     scores[0],
+     [best_box],
+     [best_class],
+     [best_score],
      category_index,
      instance_masks=None,
      use_normalized_coordinates=True,
      line_thickness=8
     )
+    Image.fromarray(image_np).save("/home/storage_disk2/datasets/lcd/2th_0104/bbox_datasets/predict_images/{}".format(base_name))
 
-    Image.fromarray(image_np).save("/home/storage_disk2/datasets/pangyo_pro/2th/starbucks/Starbucks_aveneufrance_front_door_1/{}".format(base_name))
-
- cap.release()
+ # cap.release()
  print("\n")
  print("end")
 
