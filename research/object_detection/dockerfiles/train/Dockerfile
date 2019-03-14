@@ -6,15 +6,10 @@ RUN apt-get -y install wget
 
 RUN mkdir /tf
 
+# remove dataset file
 RUN git clone --depth 1 https://github.com/RangK/models.git && \
-    mv models /tf/models
-
-COPY pipeline.config /tf/models/research/object_detection/pipelines/faster_rcnn_nas.config
-RUN mkdir /tf/models/research/object_detection/train_faster_rcnn_nas
-
-ADD http://download.tensorflow.org/models/object_detection/faster_rcnn_nas_coco_2018_01_28.tar.gz /tf/models/research/object_detection/
-RUN tar -xzf /tf/models/research/object_detection/faster_rcnn_nas_coco_2018_01_28.tar.gz -C /tf/models/research/object_detection/
-RUN rm /tf/models/research/object_detection/faster_rcnn_nas_coco_2018_01_28.tar.gz
+    mv models /tf/models && \
+    rm /tf/models/research/object_detection/data/*
 
 RUN cd /tf/models/research/ && \
     wget -O protobuf.zip https://github.com/google/protobuf/releases/download/v3.0.0/protoc-3.0.0-linux-x86_64.zip && \
@@ -50,6 +45,12 @@ ENV PYTHONPATH $PYTHONPATH:/tf/models/research:/tf/models/research/slim
 RUN apt-get install -y wget vim
 
 WORKDIR /tf/models/research/object_detection
+
+ENV TRAIN_MODEL_DIR "./train_model"
+ENV PIPELINE_PATH "./train_model/pipeline.config"
+ENV VISIBLE_GPUS "0"
+
+CMD ["python", "./model_main.py", "--model_dir", "$TRAIN_MODEL_DIR", "--pipeline_config_path", "$PIPELINE_PATH", "--gpus", "$VISIBLE_GPUS"]
 
 
 
