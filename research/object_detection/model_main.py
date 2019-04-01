@@ -24,6 +24,9 @@ import tensorflow as tf
 
 from object_detection import model_hparams
 from object_detection import model_lib
+import os
+
+os.environ['CUDA_VISIBLE_DEVICES']='2,3'
 
 flags.DEFINE_string(
     'model_dir', None, 'Path to output model directory '
@@ -54,28 +57,32 @@ flags.DEFINE_boolean(
     'run_once', False, 'If running in eval-only mode, whether to run just '
     'one round of eval vs running continuously (default).'
 )
-flags.DEFINE_string('gpus', '0', "How many GPUs do i need to train or evaluate it")
-
 FLAGS = flags.FLAGS
 
 
 def main(unused_argv):
-  import os
-  os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpus
-  gpus = FLAGS.gpus.split(",")
+  visible_gpus = os.environ['CUDA_VISIBLE_DEVICES']
+  gpus = visible_gpus.split(",")
+  if visible_gpus is None or visible_gpus is "":
+    nrof_gpus = 0
+  else:
+    nrof_gpus = len(gpus)
 
   flags.mark_flag_as_required('model_dir')
   flags.mark_flag_as_required('pipeline_config_path')
 
-  if len(gpus) > 1:
-    print("using gpus for distributed training : {}".format(FLAGS.gpus))
+  # session_config = tf.ConfigProto()
+  # session_config.gpu_options.per_process_gpu_memory_fraction = 0.8
+
+  if nrof_gpus > 1:
+    print("using gpus for distributed training : {}".format(visible_gpus))
     # TODO : MirroredStrategy
     # distribution = tf.contrib.distribute.MirroredStrategy(num_gpus=len(gpus))
     # config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir, train_distribute=distribution)
     config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir)
     use_mgpus = True
   else:
-    config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir)
+    config = tf.estimator.RunConfig(model_dir=FLAGS.model_dir, session_config=session_config)
     use_mgpus = False
 
   train_and_eval_dict = model_lib.create_estimator_and_inputs(

@@ -44,11 +44,11 @@ ENV PYTHONPATH $PYTHONPATH:/tf/models/research:/tf/models/research/slim
 # the files inside the container)
 RUN apt-get install -y wget vim
 
-WORKDIR /tf/models/research/object_detection
-
 ENV TRAIN_MODEL_DIR "./train_model"
 ENV PIPELINE_PATH "./train_model/pipeline.config"
-ENV VISIBLE_GPUS "0"
+ENV WOKRING_DIR "/tf/models/research/object_detection"
 
-CMD python ./model_main.py --model_dir $TRAIN_MODEL_DIR --pipeline_config_path $PIPELINE_PATH --gpus $VISIBLE_GPUS
+WORKDIR $WOKRING_DIR
+CMD echo $WOKRING_DIR && \
+    python ./model_main.py --model_dir $TRAIN_MODEL_DIR --pipeline_config_path $PIPELINE_PATH
 
