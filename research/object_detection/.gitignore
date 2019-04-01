@@ -1,2 +1,7 @@
 data/*.record
 faster_rcnn_nas_0303_wfs
+
+faster_rcnn_resnet50_coco_2018_01_28
+goturn*
+mask_rcnn_inception_resnet_v2_atrous_coco_2018_01_28
+mobilenet_ssd
