@@ -30,6 +30,15 @@ def xml_to_json(path):
             }, {
                 'id': 7,
                 'name': 'v1'
+            }, {
+                'id': 8,
+                'name': 't1'
+            }, {
+                'id': 9,
+                'name': 't2'
+            }, {
+                'id': 10,
+                'name': 'r5'
             }
         ],
         'annotations': []
@@ -68,6 +77,8 @@ def xml_to_json(path):
             for category in json_data['categories']:
                 if category['name'] == code:
                     category_id = category['id']
+            if category_id == -1:
+                print("category -1 : {}".format(code))
 
             json_data['annotations'].append({
                 "image_id": begin_image_id,

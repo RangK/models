@@ -69,6 +69,29 @@ FLAGS = flags.FLAGS
 tf.logging.set_verbosity(tf.logging.INFO)
 
 
+def get_directory_name(category_name):
+    if category_name == 'p1':
+        return "ACTP1C"
+    elif category_name == 'p6':
+        return "ACTP6C"
+    elif category_name == 'r1':
+        return "ACTR1C"
+    elif category_name == 'r2':
+        return "ACTR2D"
+    elif category_name == 'r5':
+        return "ACTR5T"
+    elif category_name == 'r7':
+        return "ACTR7W"
+    elif category_name == 't1':
+        return "ACTT1F"
+    elif category_name == 't2':
+        return "ACTT2C"
+    elif category_name == 'v1':
+        return "ACTV1R"
+
+    raise IndexError("category name({}) is not exist in the category list".format(category_name))
+
+
 def create_tf_example(image,
                       annotations_list,
                       image_dir,
@@ -94,27 +117,28 @@ def create_tf_example(image,
     encoded_mask_png = []
     num_annotations_skipped = 0
     for object_annotations in annotations_list:
-        (x, y, width, height) = tuple(object_annotations['bbox'])
-        if width <= 0 or height <= 0:
-            num_annotations_skipped += 1
-            continue
-        if x + width > image_width or y + height > image_height:
-            num_annotations_skipped += 1
-            continue
+        (x, y, r, b) = tuple(object_annotations['bbox'])
+        #TODO : checking x,y,r,b data is valid
+
         xmin.append(float(x) / image_width)
-        xmax.append(float(x + width) / image_width)
+        xmax.append(float(r) / image_width)
         ymin.append(float(y) / image_height)
-        ymax.append(float(y + height) / image_height)
+        ymax.append(float(b) / image_height)
         category_id = int(object_annotations['category_id'])
         category_ids.append(category_id)
         category_names.append(category_index[category_id]['name'].encode('utf8'))
 
         if include_masks:
+            # print(object_annotations['segmentation'][0])
             run_len_encoding = mask.frPyObjects(object_annotations['segmentation'],
                                                 image_height, image_width)
+            # print(run_len_encoding)
             binary_mask = mask.decode(run_len_encoding)
-
-            pil_image = PIL.Image.fromarray(binary_mask)
+            # print(binary_mask)
+            np_bi_mask = np.array(binary_mask)
+            binary_mask = np.reshape(np_bi_mask, (np_bi_mask.shape[0], np_bi_mask.shape[1]))
+            print(np.array(binary_mask).shape)
+            pil_image = PIL.Image.fromarray(binary_mask, mode="L")
             output_io = io.BytesIO()
             pil_image.save(output_io, format='PNG')
             encoded_mask_png.append(output_io.getvalue())
@@ -153,7 +177,7 @@ def create_tf_example(image,
     return key, example, num_annotations_skipped
 
 
-def _create_tf_record_from_wfs_annotations(annotations_file, image_dir, output_path, include_masks, num_shards):
+def _create_tf_record_from_wfs_annotations(annotations_file, image_root_dir, output_path, include_masks, num_shards):
     with contextlib2.ExitStack() as tf_record_close_stack, tf.gfile.GFile(annotations_file, 'r') as fid:
         output_tfrecords = tf_record_creation_util.open_sharded_output_tfrecords(
             tf_record_close_stack, output_path, num_shards)
@@ -185,6 +209,10 @@ def _create_tf_record_from_wfs_annotations(annotations_file, image_dir, output_p
             if idx % 100 == 0:
                 tf.logging.info('On image %d of %d', idx, len(images))
             annotations_list = annotations_index[image['id']]
+            category_name = category_index[annotations_list[0]['category_id']]['name']
+            category_folder = get_directory_name(category_name)
+            image_dir = os.path.join(image_root_dir, category_folder)
+
             _, tf_example, num_annotations_skipped = create_tf_example(
                 image, annotations_list, image_dir, category_index, include_masks)
             total_num_annotations_skipped += num_annotations_skipped
@@ -196,17 +224,18 @@ def _create_tf_record_from_wfs_annotations(annotations_file, image_dir, output_p
 
 def main(_):
     assert FLAGS.train_image_dir, '`train_image_dir` missing.'
-    assert FLAGS.val_image_dir, '`val_image_dir` missing.'
-    assert FLAGS.test_image_dir, '`test_image_dir` missing.'
+    # assert FLAGS.val_image_dir, '`val_image_dir` missing.'
+    # assert FLAGS.test_image_dir, '`test_image_dir` missing.'
     assert FLAGS.train_annotations_file, '`train_annotations_file` missing.'
-    assert FLAGS.val_annotations_file, '`val_annotations_file` missing.'
-    assert FLAGS.testdev_annotations_file, '`testdev_annotations_file` missing.'
+    # assert FLAGS.val_annotations_file, '`val_annotations_file` missing.'
+    # assert FLAGS.testdev_annotations_file, '`testdev_annotations_file` missing.'
 
     if not tf.gfile.IsDirectory(FLAGS.output_dir):
         tf.gfile.MakeDirs(FLAGS.output_dir)
+        
     train_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_train.record')
-    val_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_val.record')
-    testdev_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_testdev.record')
+    # val_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_val.record')
+    # testdev_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_testdev.record')
 
     _create_tf_record_from_wfs_annotations(
         FLAGS.train_annotations_file,
@@ -215,19 +244,19 @@ def main(_):
         FLAGS.include_masks,
         num_shards=100)
 
-    _create_tf_record_from_wfs_annotations(
-        FLAGS.val_annotations_file,
-        FLAGS.val_image_dir,
-        val_output_path,
-        FLAGS.include_masks,
-        num_shards=10)
-
-    _create_tf_record_from_wfs_annotations(
-        FLAGS.testdev_annotations_file,
-        FLAGS.test_image_dir,
-        testdev_output_path,
-        FLAGS.include_masks,
-        num_shards=100)
+    # _create_tf_record_from_wfs_annotations(
+    #     FLAGS.val_annotations_file,
+    #     FLAGS.val_image_dir,
+    #     val_output_path,
+    #     FLAGS.include_masks,
+    #     num_shards=10)
+    #
+    # _create_tf_record_from_wfs_annotations(
+    #     FLAGS.testdev_annotations_file,
+    #     FLAGS.test_image_dir,
+    #     testdev_output_path,
+    #     FLAGS.include_masks,
+    #     num_shards=100)
 
 
 if __name__ == '__main__':
