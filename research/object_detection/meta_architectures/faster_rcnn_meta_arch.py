@@ -1702,10 +1702,13 @@ class FasterRCNNMetaArch(model.DetectionModel):
                 prediction_dict['refined_box_encodings'],
                 prediction_dict['class_predictions_with_background'],
                 prediction_dict['proposal_boxes'],
-                prediction_dict['num_proposals'], groundtruth_boxlists,
+                prediction_dict['num_proposals'],
+                groundtruth_boxlists,
                 groundtruth_classes_with_background_list,
-                groundtruth_weights_list, prediction_dict['image_shape'],
-                prediction_dict.get('mask_predictions'), groundtruth_masks_list,
+                groundtruth_weights_list,
+                prediction_dict['image_shape'],
+                prediction_dict.get('mask_predictions'),
+                groundtruth_masks_list,
                 prediction_dict.get(
                     fields.DetectionResultFields.detection_boxes),
                 prediction_dict.get(
