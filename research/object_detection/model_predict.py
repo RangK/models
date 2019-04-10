@@ -16,6 +16,9 @@ import tensorflow as tf
 from utils import label_map_util
 from utils import visualization_utils as vis_util
 from enum import Enum
+import os
+
+os.environ['CUDA_VISIBLE_DEVICES'] = "2"
 
 flags = tf.app.flags
 flags.DEFINE_string('freeze_model', None, 'Path to directory holding a checkpoint')
@@ -26,47 +29,8 @@ flags.DEFINE_string('output_dir', None, 'Path to output results of predict')
 
 FLAGS = flags.FLAGS
 
-
-class InputDataFields(Enum):
-    FILE_NAME = 'file_name'
-    ANNOTATIONS = 'annotations'
-
-
-class EvalSummary:
-    def __init__(self):
-        self.total_count = 0
-        self.result_per_category = {}
-
-    def success_of_category(self, category_id):
-        summary = self.result_per_category.setdefault(category_id, {"success": 0, "failed": 0})
-        summary['success'] += 1
-
-    def failed_of_category(self, category_id):
-        summary = self.result_per_category.setdefault(category_id, {"success": 0, "failed": 0})
-        summary['failed'] += 1
-
-
-class InputData:
-    class Annotation:
-        def __init__(self, bbox, segmentation, category_id):
-            # {x:, y:, r:, b:}
-            self.bbox = bbox
-            # [[x1, y1, x2, y2, ...]..]
-            self.segmentation = segmentation
-            # int
-            self.category_id = category_id
-
-    def __init__(self, file_name):
-        self.file_name = file_name
-        self.annotations = []
-
-    def add_annotation(self, annotation):
-        assert isinstance(annotation, InputData.Annotation)
-        self.annotations.append(annotation)
-
-
 # TODO : read from file
-categories = [
+category_map = [
     {
         'id': 1,
         'name': 'p1'
@@ -101,6 +65,137 @@ categories = [
 ]
 
 
+class InputDataFields(Enum):
+    FILE_NAME = 'file_name'
+    ANNOTATIONS = 'annotations'
+
+
+class EvalSummary:
+    def __init__(self):
+        self.total_count = 0
+        self.result_per_category = {}
+
+    def success_of_category(self, category_id):
+        self.total_count += 1
+        summary = self.result_per_category.setdefault(category_id, {
+            "success": 0,
+            "not_found": 0,
+            "failed": 0,
+            "fn": 0,
+            "tn": 0,
+            "fp": 0
+        })
+
+        summary['success'] += 1
+
+    def failed_of_category(self, category_id, predict_category_id):
+        self.total_count += 1
+        summary = self.result_per_category.setdefault(category_id, {
+            "success": 0,
+            "not_found": 0,
+            "failed": 0,
+            "fn": 0,
+            "tn": 0,
+            "fp": 0
+        })
+
+        summary['fp'] += 1
+
+        if predict_category_id < 1:
+            summary['not_found'] += 1
+        else:
+            summary['failed'] += 1
+            fp_summary = self.result_per_category.setdefault(predict_category_id, {
+                "success": 0,
+                "not_found": 0,
+                "failed": 0,
+                "fn": 0,
+                "fp": 0
+            })
+
+            fp_summary['fp'] += 1
+
+    def precision(self, category_id):
+        # tp / (tp + fp)
+        summary = self.result_per_category.setdefault(category_id, {
+            "success": 0,
+            "not_found": 0,
+            "failed": 0,
+            "fn": 0,
+            "tn": 0,
+            "fp": 0
+        })
+        tp_fp = summary['success'] + summary['fp']
+        if tp_fp == 0:
+            return 0
+
+        return summary['success'] / tp_fp
+
+    def recall(self, category_id):
+        # tp / (tp + fn)
+        summary = self.result_per_category.setdefault(category_id, {
+            "success": 0,
+            "not_found": 0,
+            "failed": 0,
+            "fn": 0,
+            "tn": 0,
+            "fp": 0
+        })
+        tp_fn = summary['success'] + summary['fn']
+        if tp_fn == 0:
+            return 0
+
+        return summary['success'] / tp_fn
+
+    def __repr__(self):
+        result = "[Evalutation result]\n"
+
+        for category_id in self.result_per_category:
+            category_name = ""
+            for category in category_map:
+                if category['id'] == category_id:
+                    category_name = category['name']
+
+            success = self.result_per_category[category_id]['success']
+            failed = self.result_per_category[category_id]['failed']
+            not_found = self.result_per_category[category_id]['not_found']
+            precision = self.precision(category_id)
+            recall = self.recall(category_id)
+
+            result += "[{}] : success {}, failed {}, not_found {}, precision {}, recall {}\n".format(
+                category_name,
+                success,
+                failed,
+                not_found,
+                precision,
+                recall
+            )
+
+        return result
+
+    def __str__(self):
+        return self.__repr__()
+
+
+class InputData:
+    class Annotation:
+        def __init__(self, bbox, segmentation, category_id):
+            # {x:, y:, r:, b:}
+            self.bbox = bbox
+            # [[x1, y1, x2, y2, ...]..]
+            self.segmentation = segmentation
+            # int
+            self.category_id = category_id
+
+    def __init__(self, file_name):
+        self.file_name = file_name
+        self.annotations = []
+
+    def add_annotation(self, annotation):
+        assert isinstance(annotation, InputData.Annotation)
+        self.annotations.append(annotation)
+
+
 def _read_images_from_xml(xml_file, begin_image_id=0):
     next_id = begin_image_id
     tree = ET.parse(xml_file)
@@ -130,7 +225,7 @@ def _read_images_from_xml(xml_file, begin_image_id=0):
         })
 
         category_id = -1
-        for category in categories:
+        for category in category_map:
             if category['name'] == code:
                 category_id = category['id']
         if category_id == -1:
@@ -182,30 +277,28 @@ def read_xmls(root_dir):
 def _read_single_image_for_predict(path):
     frame = cv2.imread(path)
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    image_np = np.array(rgb).astype(np.uint8)
 
-    image_np_expanded = np.expand_dims(Image.fromarray(rgb), axis=0)
-
-    return image_np_expanded
+    return rgb
 
 
 def get_target_image_paths(input_datas, image_root_dir):
     sample_image_paths = futils.get_files(image_root_dir, extension='.jpg', max_depth=2)
     target_image_paths = {}
     for input_data in input_datas:
-        target_image_paths.setdefault(input_data.file_name, "")
+        target_image_paths.setdefault(input_data.file_name, {"code": input_data.annotations[0].category_id})
 
     for sample_image_path in sample_image_paths:
         file_name = sample_image_path.split("/")[-1]
         if file_name in target_image_paths:
-            target_image_paths[file_name] = sample_image_path
+            target_image_paths[file_name]["path"] = sample_image_path
 
     return target_image_paths
 
 
-def predict_bbox_and_segmentation(input_datas, image_root_dir, show_processing=False):
+def predict_bbox_and_segmentation(input_datas, image_root_dir, categories, show_processing=False):
     result = EvalSummary()
     target_image_paths = get_target_image_paths(input_datas, image_root_dir)
+    min_score_thresh = 0.5
 
     detection_graph = tf.Graph()
     with detection_graph.as_default():
@@ -222,12 +315,12 @@ def predict_bbox_and_segmentation(input_datas, image_root_dir, show_processing=F
                 scores = detection_graph.get_tensor_by_name('detection_scores:0')
                 classes = detection_graph.get_tensor_by_name('detection_classes:0')
                 num_detections = detection_graph.get_tensor_by_name('num_detections:0')
-                segmentation = detection_graph.get_tensor_by_name('detection_masks:0')
+                # segmentation = detection_graph.get_tensor_by_name('detection_masks:0')
 
-                full_path = target_image_paths[target_name]
+                full_path = target_image_paths[target_name]['path']
+                category_id = target_image_paths[target_name]['code']
 
-                frame = cv2.imread(full_path)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rgb = _read_single_image_for_predict(full_path)
                 image_np = np.array(rgb).astype(np.uint8)
 
                 image_np_expanded = np.expand_dims(Image.fromarray(rgb), axis=0)
@@ -248,25 +341,40 @@ def predict_bbox_and_segmentation(input_datas, image_root_dir, show_processing=F
                     np.array([best_box]),
                     [best_class],
                     [best_score],
-                    category_index,
+                    categories,
                     instance_masks=None,
                     use_normalized_coordinates=True,
-                    line_thickness=8
+                    line_thickness=8,
+                    min_score_thresh=min_score_thresh
                 )
 
-                Image.fromarray(image_np).save("./tmp_{}.jpg".format(i))
+                if best_class == category_id:
+                    result.success_of_category(category_id)
+                else:
+                    result.failed_of_category(category_id, best_class if best_score > min_score_thresh else -1)
+
+                # Image.fromarray(image_np).save(os.path.join(FLAGS.output_dir, "{}".format(target_name)))
+                print("progress : {} / {}".format(i, len(target_image_paths)), end='\r')
+
+    print("\n")
+    print(result)
+    with open(os.path.join(FLAGS.output_dir, "result.txt"), "w") as f:
+        f.write(str(result))
 
     return result
 
 
 if __name__ == "__main__":
+    print("STEP 01 : load input data from xmls\n")
     input_datas = read_xmls(FLAGS.xml_dir)
 
+    print("STEP 02 : load category\n")
     NUM_CLASSES = 10
     label_map = label_map_util.load_labelmap(FLAGS.label_path)
     categories = label_map_util.convert_label_map_to_categories(label_map,
                                                                 max_num_classes=NUM_CLASSES,
                                                                 use_display_name=True)
-    category_index = label_map_util.create_category_index(categories)
+    categories = label_map_util.create_category_index(categories)
 
-    results = predict_bbox_and_segmentation(input_datas, FLAGS.image_root_dir, show_processing=True)
+    print("STEP 03 : start predict bounding boxes\n")
+    results = predict_bbox_and_segmentation(input_datas, FLAGS.image_root_dir, categories, show_processing=True)
