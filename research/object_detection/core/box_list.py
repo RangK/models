@@ -54,6 +54,7 @@ class BoxList(object):
       raise ValueError('Invalid dimensions for box data.')
     if boxes.dtype != tf.float32:
       raise ValueError('Invalid tensor type: should be tf.float32')
+
     self.data = {'boxes': boxes}
 
   def num_boxes(self):

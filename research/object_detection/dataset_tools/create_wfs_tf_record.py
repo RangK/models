@@ -120,6 +120,16 @@ def create_tf_example(image,
         (x, y, r, b) = tuple(object_annotations['bbox'])
         #TODO : checking x,y,r,b data is valid
 
+        xm = float(x) / image_width
+        xx = float(r) / image_width
+        ym = float(y) / image_width
+        yx = float(b) / image_height
+
+        if xm == 0 or xx == 0 or ym == 0 or yx == 0:
+            print("bbox : {}, {}, {}, {}".format(xm, xx, ym, yx))
+        if xm >= 1 or xx >= 1 or ym >= 1 or yx >= 1:
+            print("bbox : {}, {}, {}, {}".format(xm, xx, ym, yx))
+
         xmin.append(float(x) / image_width)
         xmax.append(float(r) / image_width)
         ymin.append(float(y) / image_height)
@@ -129,16 +139,17 @@ def create_tf_example(image,
         category_names.append(category_index[category_id]['name'].encode('utf8'))
 
         if include_masks:
-            # print(object_annotations['segmentation'][0])
             run_len_encoding = mask.frPyObjects(object_annotations['segmentation'],
                                                 image_height, image_width)
-            # print(run_len_encoding)
+            # rle = mask.merge(run_len_encoding)
             binary_mask = mask.decode(run_len_encoding)
             # print(binary_mask)
             np_bi_mask = np.array(binary_mask)
             binary_mask = np.reshape(np_bi_mask, (np_bi_mask.shape[0], np_bi_mask.shape[1]))
-            print(np.array(binary_mask).shape)
+
             pil_image = PIL.Image.fromarray(binary_mask, mode="L")
+            # pil_image.save("tmp.png", format='PNG')
+
             output_io = io.BytesIO()
             pil_image.save(output_io, format='PNG')
             encoded_mask_png.append(output_io.getvalue())
@@ -173,6 +184,7 @@ def create_tf_example(image,
     if include_masks:
         feature_dict['image/object/mask'] = (
             dataset_util.bytes_list_feature(encoded_mask_png))
+
     example = tf.train.Example(features=tf.train.Features(feature=feature_dict))
     return key, example, num_annotations_skipped
 

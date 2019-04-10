@@ -792,10 +792,13 @@ def to_normalized_coordinates(boxlist, height, width,
     width = tf.cast(width, tf.float32)
 
     if check_range:
-      max_val = tf.reduce_max(boxlist.get())
-      print("max value : {}".format(max_val))
-      max_assert = tf.Assert(tf.greater(max_val, 1.2),
-                             ['max value is lower than 1.2: ', max_val])
+      boxes = boxlist.get()
+      boxes = tf.Print(boxes, [boxes], "boxes : ", summarize=100)
+
+      max_val = tf.reduce_max(boxes)
+
+      max_assert = tf.Assert(tf.greater(max_val, 1.01),
+                             ['max value is lower than 1.01: ', max_val])
       with tf.control_dependencies([max_assert]):
         width = tf.identity(width)
 

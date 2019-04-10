@@ -443,6 +443,8 @@ def create_train_input_fn(train_config, train_input_config,
       TypeError: if the `train_config`, `train_input_config` or `model_config`
         are not of the correct type.
     """
+
+    # Checking configuration needed to train a object detection
     if not isinstance(train_config, train_pb2.TrainConfig):
       raise TypeError('For training mode, the `train_config` must be a '
                       'train_pb2.TrainConfig.')
@@ -486,6 +488,7 @@ def create_train_input_fn(train_config, train_input_config,
         train_input_config,
         transform_input_data_fn=transform_and_pad_input_data_fn,
         batch_size=params['batch_size'] if params else train_config.batch_size)
+
     return dataset
 
   return _train_input_fn
