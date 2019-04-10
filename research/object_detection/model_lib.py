@@ -141,9 +141,11 @@ def unstack_batch(tensor_dict, unpad_groundtruth_tensors=True):
       ValueError: If unpad_tensors is True and `tensor_dict` does not contain
         `num_groundtruth_boxes` tensor.
     """
+
     unbatched_tensor_dict = {
         key: tf.unstack(tensor) for key, tensor in tensor_dict.items()
     }
+
     if unpad_groundtruth_tensors:
         if (fields.InputDataFields.num_groundtruth_boxes not in
             unbatched_tensor_dict):
@@ -234,8 +236,7 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_mul
             # For evaling on train data, it is necessary to check whether groundtruth
             # must be unpadded.
             boxes_shape = (
-                labels[fields.InputDataFields.groundtruth_boxes].get_shape()
-                    .as_list())
+                labels[fields.InputDataFields.groundtruth_boxes].get_shape().as_list())
             unpad_groundtruth_tensors = boxes_shape[1] is not None and not use_tpu
             labels = unstack_batch(
                 labels, unpad_groundtruth_tensors=unpad_groundtruth_tensors)

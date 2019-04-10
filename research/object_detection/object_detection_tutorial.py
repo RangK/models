@@ -83,6 +83,12 @@ if __name__ == "__main__":
     classes = detection_graph.get_tensor_by_name('detection_classes:0')
     num_detections = detection_graph.get_tensor_by_name('num_detections:0')
 
+    # If mask R-cnn
+    is_mask = True
+    masks = None
+    if is_mask:
+     masks = detection_graph.get_tensor_by_name('detection_masks:0')
+
     (boxes, scores, classes, num_detections) = sess.run(
      [boxes, scores, classes, num_detections], feed_dict={image_tensor: image_np_expanded}
     )
@@ -99,7 +105,7 @@ if __name__ == "__main__":
      [best_class],
      [best_score],
      category_index,
-     instance_masks=None,
+     instance_masks=masks,
      use_normalized_coordinates=True,
      line_thickness=8
     )
