@@ -109,6 +109,7 @@ if __name__ == "__main__":
      use_normalized_coordinates=True,
      line_thickness=8
     )
+
     Image.fromarray(image_np).save("/home/storage_disk2/datasets/lcd/2th_0104/bbox_datasets/predict_images/{}".format(base_name))
 
  # cap.release()

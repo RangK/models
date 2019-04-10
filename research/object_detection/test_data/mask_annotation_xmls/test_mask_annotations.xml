@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<annotations>
+  <version>1.1</version>
+  <meta>
+    <task>
+      <id>15</id>
+      <name>WinForSys_LCD_R2</name>
+      <size>121</size>
+      <mode>annotation</mode>
+      <overlap>0</overlap>
+      <bugtracker></bugtracker>
+      <flipped>False</flipped>
+      <created>2019-03-30 08:21:06.134717+03:00</created>
+      <updated>2019-03-31 01:55:14.226696+03:00</updated>
+      <source>121 images: 763a8z0135a1aab01_20181219_032225_-760298_615851.jpg, 763a8z0135a3aaf02_20181219_032848_-649094_312731.jpg, ...</source>
+      <labels>
+        <label>
+          <name>defect</name>
+          <attributes>
+            <attribute>~radio=quality:good,bad</attribute>
+            <attribute>@select=code:__undefined__,p1,p6,r1,r2,r5,r7,t1,t2,v1</attribute>
+          </attributes>
+        </label>
+      </labels>
+      <segments>
+        <segment>
+          <id>15</id>
+          <start>0</start>
+          <stop>120</stop>
+          <url>http://label.yodanjedi.com/?id=15</url>
+        </segment>
+      </segments>
+      <owner>
+        <username>ideadripper</username>
+        <email>ideadripper@gmail.com</email>
+      </owner>
+    </task>
+    <dumped>2019-04-06 19:29:23.853849+03:00</dumped>
+  </meta>
+  <image id="50" name="763a8z0136b6aae04_20181218_042832_-329078_380494.jpg" width="1024" height="1024">
+    <box label="defect" xtl="526.68" ytl="482.58" xbr="539.39" ybr="498.55" occluded="0">
+      <attribute name="quality">good</attribute>
+      <attribute name="code">r2</attribute>
+    </box>
+    <polygon label="defect" points="538.06,491.88;536.25,488.66;532.42,485.64;529.00,484.83;528.19,484.43;527.38,484.69;527.89,496.19;531.58,497.58;534.78,497.10;536.47,495.99;537.68,494.00;537.98,493.19" occluded="0">
+      <attribute name="quality">good</attribute>
+      <attribute name="code">r2</attribute>
+    </polygon>
+  </image>
+  <image id="51" name="763a8z0136b6aal04_20181218_042832_-348927_-78318.jpg" width="1024" height="1024">
+    <box label="defect" xtl="516.10" ytl="449.71" xbr="539.50" ybr="477.71" occluded="0">
+      <attribute name="quality">good</attribute>
+      <attribute name="code">r2</attribute>
+    </box>
+    <box label="defect" xtl="0.0" ytl="0.0" xbr="100.50" ybr="100.71" occluded="0">
+      <attribute name="quality">good</attribute>
+      <attribute name="code">r2</attribute>
+    </box>
+
+    <polygon label="defect" points="534.40,460.11;528.15,455.88;524.32,452.65;521.30,454.06;521.90,460.71;522.51,464.14;523.52,468.37;525.33,473.20;526.34,474.82;528.15,473.20;530.16,469.98;531.78,470.99;532.99,472.20;534.60,471.59;535.00,470.18;535.00,467.56;535.00,466.15;535.20,464.34;535.20,462.73" occluded="0">
+      <attribute name="quality">good</attribute>
+      <attribute name="code">r2</attribute>
+    </polygon>
+  </image>
+</annotations>
