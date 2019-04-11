@@ -2,19 +2,52 @@ import shutil
 import os
 import tempfile
 import unittest
-from dataset_tools.mask_xml_to_json import get_categories_from_map_file
+import glob
+import xml.etree.ElementTree as ET
+from dataset_tools.mask_xml_to_json import get_categories_from_map_file, _parse_box_element, _parse_xml
 
 
 class XMLToJSONTest(unittest.TestCase):
 
-    def test_get_categories(self):
+    def setUp(self):
         label_map_path = "../data/wfs_label_map.pbtxt"
-        categories = get_categories_from_map_file(label_map_path)
+        self.categories = get_categories_from_map_file(label_map_path)
 
-        self.assertEqual(len(categories), 10)
+    def test_get_categories(self):
+        self.assertEqual(len(self.categories), 10)
 
-        self.assertTrue('id' in categories[0])
-        self.assertTrue('name' in categories[0])
+        self.assertTrue('id' in self.categories[0])
+        self.assertTrue('name' in self.categories[0])
+
+    def test_parse_multi_bboxs(self):
+        with open('../test_data/mask_annotation_xmls/test_mask_annotations_multi_bboxs.xml') as f:
+            tree = ET.parse(f)
+            root = tree.getroot()
+
+            for member in root.findall('image'):
+                codes, bboxes = _parse_box_element(member)
+
+                self.assertEqual(len(codes), len(bboxes), "lengths of two list(codes, bboxes) must be equal")
+                self.assertEqual(len(bboxes), 2)
+
+    def test__parse_xml(self):
+        with open('../test_data/mask_annotation_xmls/test_mask_annotations.xml') as f:
+            tree = ET.parse(f)
+            root = tree.getroot()
+
+            images, annotations = _parse_xml(root, self.categories)
+
+            self.assertEqual(len(images), 2)
+            self.assertEqual(len(annotations), 3)
+            self.assertEqual(annotations[0]['segmentation'][0],
+                             [538, 491, 536, 488, 532, 485, 529, 484, 528, 484, 527, 484, 527, 496, 531, 497, 534, 497,
+                              536, 495, 537,
+                              494, 537, 493])
+            self.assertEqual(annotations[1]['segmentation'][0],
+                             [534, 460, 528, 455, 524, 452, 521, 454, 521, 460, 522, 464, 523, 468, 525, 473, 526, 474,
+                              528, 473, 530,
+                              469, 531, 470, 532, 472, 534, 471, 535, 470, 535, 467, 535, 466, 535, 464, 535, 462])
+            self.assertEqual(annotations[1]['segmentation'][0], annotations[2]['segmentation'][0])
 
     # def test_multiple_mask_xml(self):
     #     xml_file_one =
