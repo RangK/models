@@ -2,13 +2,23 @@ import shutil
 import os
 import tempfile
 import unittest
-import object_detection.dataset_tools.mask_xml_to_json as xml_parser
-from xml.etree import ElementTree as ET
+from dataset_tools.mask_xml_to_json import get_categories_from_map_file
 
 
-class XMLToCSVTest(unittest.TestCase):
-    def test_multiple_mask_xml(self):
-        xml_file_one = """
+class XMLToJSONTest(unittest.TestCase):
+
+    def test_get_categories(self):
+        label_map_path = "../data/wfs_label_map.pbtxt"
+        categories = get_categories_from_map_file(label_map_path)
+
+        self.assertEqual(len(categories), 10)
+
+        self.assertTrue('id' in categories[0])
+        self.assertTrue('name' in categories[0])
+
+    # def test_multiple_mask_xml(self):
+    #     xml_file_one =
+        """
 <annotations>
   <version>1.1</version>
   <meta>
@@ -59,15 +69,3 @@ class XMLToCSVTest(unittest.TestCase):
   </image>
 </annotations>
         """
-
-        xml = ET.fromstring(xml_file_one)
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            tree = ET.ElementTree(xml)
-            tree.write(tmpdirname + '/test_multiple_mask.xml')
-            raccoon_df = xml_parser.xml_to_json(tmpdirname)
-            print(raccoon_df)
-            # self.assertEqual(raccoon_df.columns.values.tolist(),
-            #                  ['filename', 'width', 'height', 'class', 'xmin', 'ymin', 'xmax', 'ymax', 'segmentation'])
-            # self.assertEqual(raccoon_df.values.tolist()[0], ['defect_test.jpg', 1024, 1024, 't2', 385, 401, 556, 568,
-            #                                                  [411, 442, 459, 414, 506, 419, 541, 450, 551, 521, 503,
-            #                                                   559, 444, 560, 408, 534, 405, 519, 394, 485, 403, 455]])
