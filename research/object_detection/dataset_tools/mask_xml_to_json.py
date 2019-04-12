@@ -95,18 +95,18 @@ def _create_annotations(image_id, codes, bboxes, polygons, categories):
     return annotations
 
 
-def _parse_xml(xml_tree, categories):
+def _parse_xml(xml_tree, categories, begin_image_id):
     images = []
     annotations = []
+    next_id = begin_image_id
 
     for member in xml_tree.findall('image'):
         codes, bboxes = _parse_box_element(member)
         polygons = _parse_polygon_elements(member)
 
         image_attr = member.attrib
-        image_id = int(image_attr['id'])
         images.append({
-            "id": image_id,
+            "id": next_id,
             'height': int(image_attr['height']),
             'width': int(image_attr['width']),
             'file_name': image_attr['name'],
@@ -114,7 +114,7 @@ def _parse_xml(xml_tree, categories):
         })
 
         annotations_in_member = _create_annotations(
-            image_id,
+            next_id,
             codes,
             bboxes,
             polygons,
@@ -122,11 +122,12 @@ def _parse_xml(xml_tree, categories):
         )
 
         annotations += annotations_in_member
+        next_id += 1
 
-    return images, annotations
+    return images, annotations, next_id
 
 
-def xml_to_json(path):
+def xml_to_json(path, begin_next_id):
     label_map_file_path = './data/wfs_label_map.pbtxt'
     categories = get_categories_from_map_file(label_map_file_path)
     assert len(categories) == 10, "failed to load categories from {}".format(label_map_file_path)
@@ -144,9 +145,11 @@ def xml_to_json(path):
         tree = ET.parse(xml_file)
         root = tree.getroot()
 
-        images, annotations = _parse_xml(root, categories)
+        images, annotations, next_id = _parse_xml(root, categories, begin_next_id)
         json_data['images'] += images
         json_data['annotations'] += annotations
+
+        begin_next_id = next_id
 
     print("\n")
     print("end.")
@@ -159,8 +162,8 @@ def main():
     json_output_dir = "/Users/rangkim/projects/datasets/winforsys/origin/v2/sample/1th_annotations/json"
     xml_root_dir = "/Users/rangkim/projects/datasets/winforsys/origin/v2/sample/1th_annotations/xmls"
 
-    train_json = xml_to_json(os.path.join(xml_root_dir, 'train'))
-    eval_json = xml_to_json(os.path.join(xml_root_dir, 'eval'))
+    train_json = xml_to_json(os.path.join(xml_root_dir, 'train'), begin_next_id=0)
+    eval_json = xml_to_json(os.path.join(xml_root_dir, 'eval'), begin_next_id=0)
 
     train_output_path = os.path.join(os.path.join(json_output_dir, 'train'), output_file_name)
     with open(train_output_path, 'w', encoding='utf-8') as output:

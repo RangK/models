@@ -239,14 +239,14 @@ def main(_):
     # assert FLAGS.val_image_dir, '`val_image_dir` missing.'
     # assert FLAGS.test_image_dir, '`test_image_dir` missing.'
     assert FLAGS.train_annotations_file, '`train_annotations_file` missing.'
-    # assert FLAGS.val_annotations_file, '`val_annotations_file` missing.'
+    assert FLAGS.val_annotations_file, '`val_annotations_file` missing.'
     # assert FLAGS.testdev_annotations_file, '`testdev_annotations_file` missing.'
 
     if not tf.gfile.IsDirectory(FLAGS.output_dir):
         tf.gfile.MakeDirs(FLAGS.output_dir)
         
     train_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_train.record')
-    # val_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_val.record')
+    val_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_val.record')
     # testdev_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_testdev.record')
 
     _create_tf_record_from_wfs_annotations(
@@ -256,12 +256,12 @@ def main(_):
         FLAGS.include_masks,
         num_shards=100)
 
-    # _create_tf_record_from_wfs_annotations(
-    #     FLAGS.val_annotations_file,
-    #     FLAGS.val_image_dir,
-    #     val_output_path,
-    #     FLAGS.include_masks,
-    #     num_shards=10)
+    _create_tf_record_from_wfs_annotations(
+        FLAGS.val_annotations_file,
+        FLAGS.train_image_dir,
+        val_output_path,
+        FLAGS.include_masks,
+        num_shards=10)
     #
     # _create_tf_record_from_wfs_annotations(
     #     FLAGS.testdev_annotations_file,
