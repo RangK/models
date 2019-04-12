@@ -24,7 +24,7 @@ RUN pip install cython
 
 RUN git clone --depth 1 https://github.com/cocodataset/cocoapi.git
 
-RUN cd cocoapi/PythonAPI && make && \
+RUN cd cocoapi/PythonAPI &  & make && \
     cp -r pycocotools /tf/models/research/ && \
     cd ../../ && \
     rm -rf cocoapi

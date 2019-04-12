@@ -51,6 +51,7 @@ MODEL_BUILD_UTIL_MAP = {
         inputs.create_eval_input_fn,
     'create_predict_input_fn':
         inputs.create_predict_input_fn,
+    'detection_model_fn_base': model_builder.build,
 }
 
 
@@ -141,11 +142,9 @@ def unstack_batch(tensor_dict, unpad_groundtruth_tensors=True):
       ValueError: If unpad_tensors is True and `tensor_dict` does not contain
         `num_groundtruth_boxes` tensor.
     """
-
     unbatched_tensor_dict = {
         key: tf.unstack(tensor) for key, tensor in tensor_dict.items()
     }
-
     if unpad_groundtruth_tensors:
         if (fields.InputDataFields.num_groundtruth_boxes not in
             unbatched_tensor_dict):
@@ -186,7 +185,8 @@ def unstack_batch(tensor_dict, unpad_groundtruth_tensors=True):
     return unbatched_tensor_dict
 
 
-def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_multi_gpus=False):
+def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False,
+                    postprocess_on_cpu=False, use_multi_gpus=False):
     """Creates a model function for `Estimator`.
 
     Args:
@@ -195,6 +195,8 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_mul
       hparams: `HParams` object.
       use_tpu: Boolean indicating whether model should be constructed for
           use on TPU.
+      postprocess_on_cpu: When use_tpu and postprocess_on_cpu is true, postprocess
+          is scheduled on the host cpu.
 
     Returns:
       `model_fn` for `Estimator`.
@@ -207,16 +209,19 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_mul
         """Constructs the object detection model.
 
         Args:
-          features: Dictionary of feature tensors, returned from `input_fn`.
-          labels: Dictionary of groundtruth tensors if mode is TRAIN or EVAL,
-            otherwise None.
-          mode: Mode key from tf.estimator.ModeKeys.
-          params: Parameter dictionary passed from the estimator.
+          tensor_dict: A dictionary of batched groundtruth tensors.
+          unpad_groundtruth_tensors: Whether to remove padding along `num_boxes`
+            dimension of the groundtruth tensors.
 
         Returns:
-          An `EstimatorSpec` that encapsulates the model and its serving
-            configurations.
+          A dictionary where the keys are from fields.InputDataFields and values are
+          a list of unstacked (optionally unpadded) tensors.
+
+        Raises:
+          ValueError: If unpad_tensors is True and `tensor_dict` does not contain
+            `num_groundtruth_boxes` tensor.
         """
+
         params = params or {}
         total_loss, train_op, detections, export_outputs = None, None, None, None
         is_training = mode == tf.estimator.ModeKeys.TRAIN
@@ -236,7 +241,8 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_mul
             # For evaling on train data, it is necessary to check whether groundtruth
             # must be unpadded.
             boxes_shape = (
-                labels[fields.InputDataFields.groundtruth_boxes].get_shape().as_list())
+                labels[fields.InputDataFields.groundtruth_boxes].get_shape()
+                    .as_list())
             unpad_groundtruth_tensors = boxes_shape[1] is not None and not use_tpu
             labels = unstack_batch(
                 labels, unpad_groundtruth_tensors=unpad_groundtruth_tensors)
@@ -284,10 +290,19 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_mul
                 preprocessed_images,
                 features[fields.InputDataFields.true_image_shape])
 
+        def postprocess_wrapper(args):
+            return detection_model.postprocess(args[0], args[1])
+
         if mode in (tf.estimator.ModeKeys.EVAL, tf.estimator.ModeKeys.PREDICT):
-            detections = detection_model.postprocess(
-                prediction_dict,
-                features[fields.InputDataFields.true_image_shape])
+            if use_tpu and postprocess_on_cpu:
+                detections = tf.contrib.tpu.outside_compilation(
+                    postprocess_wrapper,
+                    (prediction_dict,
+                     features[fields.InputDataFields.true_image_shape]))
+            else:
+                detections = postprocess_wrapper((
+                    prediction_dict,
+                    features[fields.InputDataFields.true_image_shape]))
 
         if mode == tf.estimator.ModeKeys.TRAIN:
             if train_config.fine_tune_checkpoint and hparams.load_pretrained:
@@ -300,6 +315,7 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_mul
                     else:
                         train_config.fine_tune_checkpoint_type = 'classification'
 
+                print(detection_model)
                 asg_map = detection_model.restore_map(
                     fine_tune_checkpoint_type=train_config.fine_tune_checkpoint_type,
                     load_all_detection_checkpoint_vars=(
@@ -317,180 +333,219 @@ def create_model_fn(detection_model_fn, configs, hparams, use_tpu=False, use_mul
                         return tf.train.Scaffold()
 
                     scaffold_fn = tpu_scaffold
+
                 else:
-                    tf.train.init_from_checkpoint(train_config.fine_tune_checkpoint,
-                                                  available_var_map)
+                    prediction_dict = detection_model.predict(
+                        preprocessed_images,
+                        features[fields.InputDataFields.true_image_shape])
 
-        if mode in (tf.estimator.ModeKeys.TRAIN, tf.estimator.ModeKeys.EVAL):
-            losses_dict = detection_model.loss(
-                prediction_dict, features[fields.InputDataFields.true_image_shape])
-            losses = [loss_tensor for loss_tensor in losses_dict.values()]
-            if train_config.add_regularization_loss:
-                regularization_losses = detection_model.regularization_losses()
-                if regularization_losses:
-                    regularization_loss = tf.add_n(
-                        regularization_losses, name='regularization_loss')
-                    losses.append(regularization_loss)
-                    losses_dict['Loss/regularization_loss'] = regularization_loss
-            total_loss = tf.add_n(losses, name='total_loss')
-            losses_dict['Loss/total_loss'] = total_loss
+                if mode in (tf.estimator.ModeKeys.EVAL, tf.estimator.ModeKeys.PREDICT):
+                    detections = detection_model.postprocess(
+                        prediction_dict,
+                        features[fields.InputDataFields.true_image_shape])
 
-            if 'graph_rewriter_config' in configs:
-                graph_rewriter_fn = graph_rewriter_builder.build(
-                    configs['graph_rewriter_config'], is_training=is_training)
-                graph_rewriter_fn()
+                if mode == tf.estimator.ModeKeys.TRAIN:
+                    if train_config.fine_tune_checkpoint and hparams.load_pretrained:
+                        if not train_config.fine_tune_checkpoint_type:
+                            # train_config.from_detection_checkpoint field is deprecated. For
+                            # backward compatibility, set train_config.fine_tune_checkpoint_type
+                            # based on train_config.from_detection_checkpoint.
+                            if train_config.from_detection_checkpoint:
+                                train_config.fine_tune_checkpoint_type = 'detection'
+                            else:
+                                train_config.fine_tune_checkpoint_type = 'classification'
 
-            # TODO(rathodv): Stop creating optimizer summary vars in EVAL mode once we
-            # can write learning rate summaries on TPU without host calls.
-            global_step = tf.train.get_or_create_global_step()
-            training_optimizer, optimizer_summary_vars = optimizer_builder.build(
-                train_config.optimizer)
+                        asg_map = detection_model.restore_map(
+                            fine_tune_checkpoint_type=train_config.fine_tune_checkpoint_type,
+                            load_all_detection_checkpoint_vars=(
+                                train_config.load_all_detection_checkpoint_vars))
+                        available_var_map = (
+                            variables_helper.get_variables_available_in_checkpoint(
+                                asg_map,
+                                train_config.fine_tune_checkpoint,
+                                include_global_step=False))
+                        if use_tpu:
 
-            if use_multi_gpus and mode is tf.estimator.ModeKeys.TRAIN:
-                print("TowerOptimizer : {}".format(True))
-                training_optimizer = tf.contrib.estimator.TowerOptimizer(training_optimizer)
+                            def tpu_scaffold():
+                                tf.train.init_from_checkpoint(train_config.fine_tune_checkpoint,
+                                                              available_var_map)
+                                return tf.train.Scaffold()
 
-        if mode == tf.estimator.ModeKeys.TRAIN:
-            if use_tpu:
-                training_optimizer = tf.contrib.tpu.CrossShardOptimizer(
-                    training_optimizer)
+                            scaffold_fn = tpu_scaffold
+                        else:
+                            tf.train.init_from_checkpoint(train_config.fine_tune_checkpoint,
+                                                          available_var_map)
 
-            # Optionally freeze some layers by setting their gradients to be zero.
-            trainable_variables = None
-            include_variables = (
-                train_config.update_trainable_variables
-                if train_config.update_trainable_variables else None)
-            exclude_variables = (
-                train_config.freeze_variables
-                if train_config.freeze_variables else None)
-            trainable_variables = tf.contrib.framework.filter_variables(
-                tf.trainable_variables(),
-                include_patterns=include_variables,
-                exclude_patterns=exclude_variables)
+                if mode in (tf.estimator.ModeKeys.TRAIN, tf.estimator.ModeKeys.EVAL):
+                    losses_dict = detection_model.loss(
+                        prediction_dict, features[fields.InputDataFields.true_image_shape])
+                    losses = [loss_tensor for loss_tensor in losses_dict.values()]
+                    if train_config.add_regularization_loss:
+                        regularization_losses = detection_model.regularization_losses()
+                        if regularization_losses:
+                            regularization_loss = tf.add_n(
+                                regularization_losses, name='regularization_loss')
+                            losses.append(regularization_loss)
+                            losses_dict['Loss/regularization_loss'] = regularization_loss
+                    total_loss = tf.add_n(losses, name='total_loss')
+                    losses_dict['Loss/total_loss'] = total_loss
 
-            clip_gradients_value = None
-            if train_config.gradient_clipping_by_norm > 0:
-                clip_gradients_value = train_config.gradient_clipping_by_norm
+                    if 'graph_rewriter_config' in configs:
+                        graph_rewriter_fn = graph_rewriter_builder.build(
+                            configs['graph_rewriter_config'], is_training=is_training)
+                        graph_rewriter_fn()
 
-            if not use_tpu:
-                for var in optimizer_summary_vars:
-                    tf.summary.scalar(var.op.name, var)
-            summaries = [] if use_tpu else None
-            if train_config.summarize_gradients:
-                summaries = ['gradients', 'gradient_norm', 'global_gradient_norm']
-            train_op = tf.contrib.layers.optimize_loss(
-                loss=total_loss,
-                global_step=global_step,
-                learning_rate=None,
-                clip_gradients=clip_gradients_value,
-                optimizer=training_optimizer,
-                update_ops=detection_model.updates(),
-                variables=trainable_variables,
-                summaries=summaries,
-                name='')  # Preventing scope prefix on all variables.
+                    # TODO(rathodv): Stop creating optimizer summary vars in EVAL mode once we
+                    # can write learning rate summaries on TPU without host calls.
+                    global_step = tf.train.get_or_create_global_step()
+                    training_optimizer, optimizer_summary_vars = optimizer_builder.build(
+                        train_config.optimizer)
 
-        if mode == tf.estimator.ModeKeys.PREDICT:
-            exported_output = exporter_lib.add_output_tensor_nodes(detections)
-            export_outputs = {
-                tf.saved_model.signature_constants.PREDICT_METHOD_NAME:
-                    tf.estimator.export.PredictOutput(exported_output)
-            }
+                    if use_multi_gpus and mode is tf.estimator.ModeKeys.TRAIN:
+                        print("TowerOptimizer : {}".format(True))
+                        training_optimizer = tf.contrib.estimator.TowerOptimizer(training_optimizer)
 
-        eval_metric_ops = None
-        scaffold = None
-        if mode == tf.estimator.ModeKeys.EVAL:
-            class_agnostic = (
-                fields.DetectionResultFields.detection_classes not in detections)
-            groundtruth = _prepare_groundtruth_for_eval(
-                detection_model, class_agnostic,
-                eval_input_config.max_number_of_boxes)
-            use_original_images = fields.InputDataFields.original_image in features
-            if use_original_images:
-                eval_images = features[fields.InputDataFields.original_image]
-                true_image_shapes = tf.slice(
-                    features[fields.InputDataFields.true_image_shape], [0, 0], [-1, 3])
-                original_image_spatial_shapes = features[fields.InputDataFields
-                    .original_image_spatial_shape]
-            else:
-                eval_images = features[fields.InputDataFields.image]
-                true_image_shapes = None
-                original_image_spatial_shapes = None
+                if mode == tf.estimator.ModeKeys.TRAIN:
+                    if use_tpu:
+                        training_optimizer = tf.contrib.tpu.CrossShardOptimizer(
+                            training_optimizer)
 
-            eval_dict = eval_util.result_dict_for_batched_example(
-                eval_images,
-                features[inputs.HASH_KEY],
-                detections,
-                groundtruth,
-                class_agnostic=class_agnostic,
-                scale_to_absolute=True,
-                original_image_spatial_shapes=original_image_spatial_shapes,
-                true_image_shapes=true_image_shapes)
+                    # Optionally freeze some layers by setting their gradients to be zero.
+                    trainable_variables = None
+                    include_variables = (
+                        train_config.update_trainable_variables
+                        if train_config.update_trainable_variables else None)
+                    exclude_variables = (
+                        train_config.freeze_variables
+                        if train_config.freeze_variables else None)
+                    trainable_variables = tf.contrib.framework.filter_variables(
+                        tf.trainable_variables(),
+                        include_patterns=include_variables,
+                        exclude_patterns=exclude_variables)
 
-            if class_agnostic:
-                category_index = label_map_util.create_class_agnostic_category_index()
-            else:
-                category_index = label_map_util.create_category_index_from_labelmap(
-                    eval_input_config.label_map_path)
-            vis_metric_ops = None
-            if not use_tpu and use_original_images:
-                eval_metric_op_vis = vis_utils.VisualizeSingleFrameDetections(
-                    category_index,
-                    max_examples_to_draw=eval_config.num_visualizations,
-                    max_boxes_to_draw=eval_config.max_num_boxes_to_visualize,
-                    min_score_thresh=eval_config.min_score_threshold,
-                    use_normalized_coordinates=False)
-                vis_metric_ops = eval_metric_op_vis.get_estimator_eval_metric_ops(
-                    eval_dict)
+                    clip_gradients_value = None
+                    if train_config.gradient_clipping_by_norm > 0:
+                        clip_gradients_value = train_config.gradient_clipping_by_norm
 
-            # Eval metrics on a single example.
-            eval_metric_ops = eval_util.get_eval_metric_ops_for_evaluators(
-                eval_config, list(category_index.values()), eval_dict)
-            for loss_key, loss_tensor in iter(losses_dict.items()):
-                eval_metric_ops[loss_key] = tf.metrics.mean(loss_tensor)
-            for var in optimizer_summary_vars:
-                eval_metric_ops[var.op.name] = (var, tf.no_op())
-            if vis_metric_ops is not None:
-                eval_metric_ops.update(vis_metric_ops)
-            eval_metric_ops = {str(k): v for k, v in eval_metric_ops.items()}
+                    if not use_tpu:
+                        for var in optimizer_summary_vars:
+                            tf.summary.scalar(var.op.name, var)
+                    summaries = [] if use_tpu else None
+                    if train_config.summarize_gradients:
+                        summaries = ['gradients', 'gradient_norm', 'global_gradient_norm']
+                    train_op = tf.contrib.layers.optimize_loss(
+                        loss=total_loss,
+                        global_step=global_step,
+                        learning_rate=None,
+                        clip_gradients=clip_gradients_value,
+                        optimizer=training_optimizer,
+                        update_ops=detection_model.updates(),
+                        variables=trainable_variables,
+                        summaries=summaries,
+                        name='')  # Preventing scope prefix on all variables.
 
-            if eval_config.use_moving_averages:
-                variable_averages = tf.train.ExponentialMovingAverage(0.0)
-                variables_to_restore = variable_averages.variables_to_restore()
-                keep_checkpoint_every_n_hours = (
-                    train_config.keep_checkpoint_every_n_hours)
-                saver = tf.train.Saver(
-                    variables_to_restore,
-                    keep_checkpoint_every_n_hours=keep_checkpoint_every_n_hours)
-                scaffold = tf.train.Scaffold(saver=saver)
+                if mode == tf.estimator.ModeKeys.PREDICT:
+                    exported_output = exporter_lib.add_output_tensor_nodes(detections)
+                    export_outputs = {
+                        tf.saved_model.signature_constants.PREDICT_METHOD_NAME:
+                            tf.estimator.export.PredictOutput(exported_output)
+                    }
 
-        # EVAL executes on CPU, so use regular non-TPU EstimatorSpec.
-        if use_tpu and mode != tf.estimator.ModeKeys.EVAL:
-            return tf.contrib.tpu.TPUEstimatorSpec(
-                mode=mode,
-                scaffold_fn=scaffold_fn,
-                predictions=detections,
-                loss=total_loss,
-                train_op=train_op,
-                eval_metrics=eval_metric_ops,
-                export_outputs=export_outputs)
-        else:
-            if scaffold is None:
-                keep_checkpoint_every_n_hours = (
-                    train_config.keep_checkpoint_every_n_hours)
-                saver = tf.train.Saver(
-                    sharded=True,
-                    keep_checkpoint_every_n_hours=keep_checkpoint_every_n_hours,
-                    save_relative_paths=True)
-                tf.add_to_collection(tf.GraphKeys.SAVERS, saver)
-                scaffold = tf.train.Scaffold(saver=saver)
-            return tf.estimator.EstimatorSpec(
-                mode=mode,
-                predictions=detections,
-                loss=total_loss,
-                train_op=train_op,
-                eval_metric_ops=eval_metric_ops,
-                export_outputs=export_outputs,
-                scaffold=scaffold)
+                eval_metric_ops = None
+                scaffold = None
+                if mode == tf.estimator.ModeKeys.EVAL:
+                    class_agnostic = (
+                        fields.DetectionResultFields.detection_classes not in detections)
+                    groundtruth = _prepare_groundtruth_for_eval(
+                        detection_model, class_agnostic,
+                        eval_input_config.max_number_of_boxes)
+                    use_original_images = fields.InputDataFields.original_image in features
+                    if use_original_images:
+                        eval_images = features[fields.InputDataFields.original_image]
+                        true_image_shapes = tf.slice(
+                            features[fields.InputDataFields.true_image_shape], [0, 0], [-1, 3])
+                        original_image_spatial_shapes = features[fields.InputDataFields
+                            .original_image_spatial_shape]
+                    else:
+                        eval_images = features[fields.InputDataFields.image]
+                        true_image_shapes = None
+                        original_image_spatial_shapes = None
+
+                    eval_dict = eval_util.result_dict_for_batched_example(
+                        eval_images,
+                        features[inputs.HASH_KEY],
+                        detections,
+                        groundtruth,
+                        class_agnostic=class_agnostic,
+                        scale_to_absolute=True,
+                        original_image_spatial_shapes=original_image_spatial_shapes,
+                        true_image_shapes=true_image_shapes)
+
+                    if class_agnostic:
+                        category_index = label_map_util.create_class_agnostic_category_index()
+                    else:
+                        category_index = label_map_util.create_category_index_from_labelmap(
+                            eval_input_config.label_map_path)
+                    vis_metric_ops = None
+                    if not use_tpu and use_original_images:
+                        eval_metric_op_vis = vis_utils.VisualizeSingleFrameDetections(
+                            category_index,
+                            max_examples_to_draw=eval_config.num_visualizations,
+                            max_boxes_to_draw=eval_config.max_num_boxes_to_visualize,
+                            min_score_thresh=eval_config.min_score_threshold,
+                            use_normalized_coordinates=False)
+                        vis_metric_ops = eval_metric_op_vis.get_estimator_eval_metric_ops(
+                            eval_dict)
+
+                    # Eval metrics on a single example.
+                    eval_metric_ops = eval_util.get_eval_metric_ops_for_evaluators(
+                        eval_config, list(category_index.values()), eval_dict)
+                    for loss_key, loss_tensor in iter(losses_dict.items()):
+                        eval_metric_ops[loss_key] = tf.metrics.mean(loss_tensor)
+                    for var in optimizer_summary_vars:
+                        eval_metric_ops[var.op.name] = (var, tf.no_op())
+                    if vis_metric_ops is not None:
+                        eval_metric_ops.update(vis_metric_ops)
+                    eval_metric_ops = {str(k): v for k, v in eval_metric_ops.items()}
+
+                    if eval_config.use_moving_averages:
+                        variable_averages = tf.train.ExponentialMovingAverage(0.0)
+                        variables_to_restore = variable_averages.variables_to_restore()
+                        keep_checkpoint_every_n_hours = (
+                            train_config.keep_checkpoint_every_n_hours)
+                        saver = tf.train.Saver(
+                            variables_to_restore,
+                            keep_checkpoint_every_n_hours=keep_checkpoint_every_n_hours)
+                        scaffold = tf.train.Scaffold(saver=saver)
+
+                # EVAL executes on CPU, so use regular non-TPU EstimatorSpec.
+                if use_tpu and mode != tf.estimator.ModeKeys.EVAL:
+                    return tf.contrib.tpu.TPUEstimatorSpec(
+                        mode=mode,
+                        scaffold_fn=scaffold_fn,
+                        predictions=detections,
+                        loss=total_loss,
+                        train_op=train_op,
+                        eval_metrics=eval_metric_ops,
+                        export_outputs=export_outputs)
+                else:
+                    if scaffold is None:
+                        keep_checkpoint_every_n_hours = (
+                            train_config.keep_checkpoint_every_n_hours)
+                        saver = tf.train.Saver(
+                            sharded=True,
+                            keep_checkpoint_every_n_hours=keep_checkpoint_every_n_hours,
+                            save_relative_paths=True)
+                        tf.add_to_collection(tf.GraphKeys.SAVERS, saver)
+                        scaffold = tf.train.Scaffold(saver=saver)
+                    return tf.estimator.EstimatorSpec(
+                        mode=mode,
+                        predictions=detections,
+                        loss=total_loss,
+                        train_op=train_op,
+                        eval_metric_ops=eval_metric_ops,
+                        export_outputs=export_outputs,
+                        scaffold=scaffold)
 
     return model_fn
 
@@ -510,6 +565,8 @@ def create_estimator_and_inputs(run_config,
                                 params=None,
                                 override_eval_num_epochs=True,
                                 save_final_config=False,
+                                postprocess_on_cpu=False,
+                                export_to_tpu=None,
                                 **kwargs):
     """Creates `Estimator`, input functions, and steps.
 
@@ -544,10 +601,15 @@ def create_estimator_and_inputs(run_config,
         is True.
       params: Parameter dictionary passed from the estimator. Only used if
         `use_tpu_estimator` is True.
-      override_eval_num_epochs: Whether to overwrite the number of epochs to
-        1 for eval_input.
+      override_eval_num_epochs: Whether to overwrite the number of epochs to 1 for
+        eval_input.
       save_final_config: Whether to save final config (obtained after applying
         overrides) to `estimator.model_dir`.
+      postprocess_on_cpu: When use_tpu and postprocess_on_cpu are true,
+        postprocess is scheduled on the host cpu.
+      export_to_tpu: When use_tpu and export_to_tpu are true,
+        `export_savedmodel()` exports a metagraph for serving on TPU besides the
+        one on CPU.
       **kwargs: Additional keyword arguments for configuration override.
 
     Returns:
@@ -561,9 +623,6 @@ def create_estimator_and_inputs(run_config,
       'train_steps': Number of training steps. Either directly from input or from
         configuration.
     """
-
-    # build functions needed making a estimators
-    # MODEL_BUILD_UTIL_MAP is dict {key : function name, value : func}
     get_configs_from_pipeline_file = MODEL_BUILD_UTIL_MAP[
         'get_configs_from_pipeline_file']
     merge_external_params_with_configs = MODEL_BUILD_UTIL_MAP[
@@ -573,16 +632,15 @@ def create_estimator_and_inputs(run_config,
     create_train_input_fn = MODEL_BUILD_UTIL_MAP['create_train_input_fn']
     create_eval_input_fn = MODEL_BUILD_UTIL_MAP['create_eval_input_fn']
     create_predict_input_fn = MODEL_BUILD_UTIL_MAP['create_predict_input_fn']
+    detection_model_fn_base = MODEL_BUILD_UTIL_MAP['detection_model_fn_base']
 
-    # generate Config Instance from a Pipeline config file
-    configs = get_configs_from_pipeline_file(pipeline_config_path,
-                                             config_override=config_override)
-
+    configs = get_configs_from_pipeline_file(
+        pipeline_config_path, config_override=config_override)
     kwargs.update({
         'train_steps': train_steps,
-        'sample_1_of_n_eval_examples': sample_1_of_n_eval_examples
+        'sample_1_of_n_eval_examples': sample_1_of_n_eval_examples,
+        'use_bfloat16': configs['train_config'].use_bfloat16 and use_tpu
     })
-
     if override_eval_num_epochs:
         kwargs.update({'eval_num_epochs': 1})
         tf.logging.warning(
@@ -609,17 +667,14 @@ def create_estimator_and_inputs(run_config,
     if train_steps is None and train_config.num_steps != 0:
         train_steps = train_config.num_steps
 
-    # model_builder.build 함수를 호출 하는 callable 함수 생성 (parameter : model_config)
     detection_model_fn = functools.partial(
-        model_builder.build, model_config=model_config)
+        detection_model_fn_base, model_config=model_config)
 
     # Create the input functions for TRAIN/EVAL/PREDICT.
     train_input_fn = create_train_input_fn(
         train_config=train_config,
         train_input_config=train_input_config,
-        model_config=model_config
-    )
-
+        model_config=model_config)
     eval_input_fns = [
         create_eval_input_fn(
             eval_config=eval_config,
@@ -633,15 +688,16 @@ def create_estimator_and_inputs(run_config,
         eval_config=eval_config,
         eval_input_config=eval_on_train_input_config,
         model_config=model_config)
-
     predict_input_fn = create_predict_input_fn(
         model_config=model_config, predict_input_config=eval_input_configs[0])
 
-    export_to_tpu = hparams.get('export_to_tpu', False)
+    # Read export_to_tpu from hparams if not passed.
+    if export_to_tpu is None:
+        export_to_tpu = hparams.get('export_to_tpu', False)
     tf.logging.info('create_estimator_and_inputs: use_tpu %s, export_to_tpu %s',
                     use_tpu, export_to_tpu)
     model_fn = model_fn_creator(detection_model_fn, configs, hparams, use_tpu,
-                                use_multi_gpus=use_mgpus)
+                                postprocess_on_cpu, use_multi_gpus=use_mgpus)
     if use_tpu_estimator:
         estimator = tf.contrib.tpu.TPUEstimator(
             model_fn=model_fn,
@@ -650,15 +706,12 @@ def create_estimator_and_inputs(run_config,
             eval_batch_size=num_shards * 1 if use_tpu else 1,
             use_tpu=use_tpu,
             config=run_config,
-            # TODO(lzc): Remove conditional after CMLE moves to TF 1.9
+            export_to_tpu=export_to_tpu,
+            eval_on_tpu=False,  # Eval runs on CPU, so disable eval on TPU
             params=params if params else {})
     else:
-        if use_mgpus:
-            print("model fn is replicated")
-            model_fn = tf.contrib.estimator.replicate_model_fn(model_fn)
-
-        estimator = tf.estimator.Estimator(model_fn=model_fn,
-                                           config=run_config)
+        print(model_fn)
+        estimator = tf.estimator.Estimator(model_fn=model_fn, config=run_config)
 
     # Write the as-run pipeline config to disk.
     if run_config.is_chief and save_final_config:

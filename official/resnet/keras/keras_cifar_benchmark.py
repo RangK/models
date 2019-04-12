@@ -18,25 +18,38 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
 import time
 from absl import flags
+import tensorflow as tf # pylint: disable=g-bad-import-order
 
 from official.resnet import cifar10_main as cifar_main
 from official.resnet.keras import keras_benchmark
 from official.resnet.keras import keras_cifar_main
 from official.resnet.keras import keras_common
 
-DATA_DIR = '/data/cifar10_data/cifar-10-batches-bin'
 MIN_TOP_1_ACCURACY = 0.925
 MAX_TOP_1_ACCURACY = 0.938
 
 FLAGS = flags.FLAGS
+CIFAR_DATA_DIR_NAME = 'cifar-10-batches-bin'
 
 
 class Resnet56KerasAccuracy(keras_benchmark.KerasBenchmark):
   """Accuracy tests for ResNet56 Keras CIFAR-10."""
 
-  def __init__(self, output_dir=None):
+  def __init__(self, output_dir=None, root_data_dir=None, **kwargs):
+    """A benchmark class.
+
+    Args:
+      output_dir: directory where to output e.g. log files
+      root_data_dir: directory under which to look for dataset
+      **kwargs: arbitrary named arguments. This is needed to make the
+                constructor forward compatible in case PerfZero provides more
+                named arguments before updating the constructor.
+    """
+
+    self.data_dir = os.path.join(root_data_dir, CIFAR_DATA_DIR_NAME)
     flag_methods = [
         keras_common.define_keras_flags, cifar_main.define_cifar_flags
     ]
@@ -48,7 +61,7 @@ class Resnet56KerasAccuracy(keras_benchmark.KerasBenchmark):
     """Test keras based model with Keras fit and distribution strategies."""
     self._setup()
     FLAGS.num_gpus = 1
-    FLAGS.data_dir = DATA_DIR
+    FLAGS.data_dir = self.data_dir
     FLAGS.batch_size = 128
     FLAGS.train_epochs = 182
     FLAGS.model_dir = self._get_model_dir('benchmark_graph_1_gpu')
@@ -59,7 +72,7 @@ class Resnet56KerasAccuracy(keras_benchmark.KerasBenchmark):
     """Test keras based model with eager and distribution strategies."""
     self._setup()
     FLAGS.num_gpus = 1
-    FLAGS.data_dir = DATA_DIR
+    FLAGS.data_dir = self.data_dir
     FLAGS.batch_size = 128
     FLAGS.train_epochs = 182
     FLAGS.model_dir = self._get_model_dir('benchmark_1_gpu')
@@ -71,7 +84,7 @@ class Resnet56KerasAccuracy(keras_benchmark.KerasBenchmark):
     """Test keras based model with eager and distribution strategies."""
     self._setup()
     FLAGS.num_gpus = 2
-    FLAGS.data_dir = DATA_DIR
+    FLAGS.data_dir = self.data_dir
     FLAGS.batch_size = 128
     FLAGS.train_epochs = 182
     FLAGS.model_dir = self._get_model_dir('benchmark_2_gpu')
@@ -83,7 +96,7 @@ class Resnet56KerasAccuracy(keras_benchmark.KerasBenchmark):
     """Test keras based model with Keras fit and distribution strategies."""
     self._setup()
     FLAGS.num_gpus = 2
-    FLAGS.data_dir = DATA_DIR
+    FLAGS.data_dir = self.data_dir
     FLAGS.batch_size = 128
     FLAGS.train_epochs = 182
     FLAGS.model_dir = self._get_model_dir('benchmark_graph_2_gpu')
@@ -95,7 +108,7 @@ class Resnet56KerasAccuracy(keras_benchmark.KerasBenchmark):
     self._setup()
     FLAGS.distribution_strategy = 'off'
     FLAGS.num_gpus = 1
-    FLAGS.data_dir = DATA_DIR
+    FLAGS.data_dir = self.data_dir
     FLAGS.batch_size = 128
     FLAGS.train_epochs = 182
     FLAGS.model_dir = self._get_model_dir('benchmark_graph_1_gpu_no_dist_strat')
@@ -198,26 +211,30 @@ class Resnet56KerasBenchmarkBase(keras_benchmark.KerasBenchmark):
 class Resnet56KerasBenchmarkSynth(Resnet56KerasBenchmarkBase):
   """Synthetic benchmarks for ResNet56 and Keras."""
 
-  def __init__(self, output_dir=None):
-    def_flags = {}
-    def_flags['skip_eval'] = True
-    def_flags['use_synthetic_data'] = True
-    def_flags['train_steps'] = 110
-    def_flags['log_steps'] = 10
+  def __init__(self, output_dir=None, root_data_dir=None, **kwargs):
+    default_flags = {}
+    default_flags['skip_eval'] = True
+    default_flags['use_synthetic_data'] = True
+    default_flags['train_steps'] = 110
+    default_flags['log_steps'] = 10
 
     super(Resnet56KerasBenchmarkSynth, self).__init__(
-        output_dir=output_dir, default_flags=def_flags)
+        output_dir=output_dir, default_flags=default_flags)
 
 
 class Resnet56KerasBenchmarkReal(Resnet56KerasBenchmarkBase):
   """Real data benchmarks for ResNet56 and Keras."""
 
-  def __init__(self, output_dir=None):
-    def_flags = {}
-    def_flags['skip_eval'] = True
-    def_flags['data_dir'] = DATA_DIR
-    def_flags['train_steps'] = 110
-    def_flags['log_steps'] = 10
+  def __init__(self, output_dir=None, root_data_dir=None, **kwargs):
+    default_flags = {}
+    default_flags['skip_eval'] = True
+    default_flags['data_dir'] = os.path.join(root_data_dir, CIFAR_DATA_DIR_NAME)
+    default_flags['train_steps'] = 110
+    default_flags['log_steps'] = 10
 
     super(Resnet56KerasBenchmarkReal, self).__init__(
-        output_dir=output_dir, default_flags=def_flags)
+        output_dir=output_dir, default_flags=default_flags)
+
+
+if __name__ == '__main__':
+  tf.test.main()

@@ -53,7 +53,8 @@ def process_record_dataset(dataset,
                            num_epochs=1,
                            dtype=tf.float32,
                            datasets_num_private_threads=None,
-                           num_parallel_batches=1):
+                           num_parallel_batches=1,
+                           drop_remainder=False):
   """Given a Dataset with raw records, return an iterator over the records.
 
   Args:
@@ -70,6 +71,8 @@ def process_record_dataset(dataset,
     datasets_num_private_threads: Number of threads for a private
       threadpool created for all datasets computation.
     num_parallel_batches: Number of parallel batches for tf.data.
+    drop_remainder: A boolean indicates whether to drop the remainder of the
+      batches. If True, the batch dimension will be static.
 
   Returns:
     Dataset of (image, label) pairs ready for iteration.
@@ -77,12 +80,16 @@ def process_record_dataset(dataset,
   # Defines a specific size thread pool for tf.data operations.
   if datasets_num_private_threads:
     options = tf.data.Options()
-    options.experimental_threading = tf.data.experimental.ThreadingOptions()
     options.experimental_threading.private_threadpool_size = (
         datasets_num_private_threads)
     dataset = dataset.with_options(options)
     tf.compat.v1.logging.info('datasets_num_private_threads: %s',
                               datasets_num_private_threads)
+
+  # Disable intra-op parallelism to optimize for throughput instead of latency.
+  options = tf.data.Options()
+  options.experimental_threading.max_intra_op_parallelism = 1
+  dataset = dataset.with_options(options)
 
   # Prefetches a batch at a time to smooth out the time taken to load input
   # files for shuffling and processing.
@@ -95,12 +102,10 @@ def process_record_dataset(dataset,
   dataset = dataset.repeat(num_epochs)
 
   # Parses the raw records into images and labels.
-  dataset = dataset.apply(
-      tf.data.experimental.map_and_batch(
-          lambda value: parse_record_fn(value, is_training, dtype),
-          batch_size=batch_size,
-          num_parallel_batches=num_parallel_batches,
-          drop_remainder=False))
+  dataset = dataset.map(
+      lambda value: parse_record_fn(value, is_training, dtype),
+      num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
 
   # Operations between the final prefetch and the get_next call to the iterator
   # will happen synchronously during run time. We prefetch here again to
@@ -267,6 +272,56 @@ def learning_rate_with_decay(
                      false_fn=lambda: lr)
     return lr
 
+  def poly_rate_fn(global_step):
+    """Handles linear scaling rule, gradual warmup, and LR decay.
+
+    The learning rate starts at 0, then it increases linearly per step.  After
+    FLAGS.poly_warmup_epochs, we reach the base learning rate (scaled to account
+    for batch size). The learning rate is then decayed using a polynomial rate
+    decay schedule with power 2.0.
+
+    Args:
+      global_step: the current global_step
+
+    Returns:
+      returns the current learning rate
+    """
+
+    # Learning rate schedule for LARS polynomial schedule
+    if flags.FLAGS.batch_size < 8192:
+      plr = 5.0
+      w_epochs = 5
+    elif flags.FLAGS.batch_size < 16384:
+      plr = 10.0
+      w_epochs = 5
+    elif flags.FLAGS.batch_size < 32768:
+      plr = 25.0
+      w_epochs = 5
+    else:
+      plr = 32.0
+      w_epochs = 14
+
+    w_steps = int(w_epochs * batches_per_epoch)
+    wrate = (plr * tf.cast(global_step, tf.float32) / tf.cast(
+        w_steps, tf.float32))
+
+    # TODO(pkanwar): use a flag to help calc num_epochs.
+    num_epochs = 90
+    train_steps = batches_per_epoch * num_epochs
+
+    min_step = tf.constant(1, dtype=tf.int64)
+    decay_steps = tf.maximum(min_step, tf.subtract(global_step, w_steps))
+    poly_rate = tf.train.polynomial_decay(
+        plr,
+        decay_steps,
+        train_steps - w_steps + 1,
+        power=2.0)
+    return tf.where(global_step <= w_steps, wrate, poly_rate)
+
+  # For LARS we have a new learning rate schedule
+  if flags.FLAGS.enable_lars:
+    return poly_rate_fn
+
   return learning_rate_fn
 
 
@@ -274,7 +329,7 @@ def resnet_model_fn(features, labels, mode, model_class,
                     resnet_size, weight_decay, learning_rate_fn, momentum,
                     data_format, resnet_version, loss_scale,
                     loss_filter_fn=None, dtype=resnet_model.DEFAULT_DTYPE,
-                    fine_tune=False):
+                    fine_tune=False, label_smoothing=0.0):
   """Shared functionality for different resnet model_fns.
 
   Initializes the ResnetModel representing the model layers
@@ -308,6 +363,7 @@ def resnet_model_fn(features, labels, mode, model_class,
       from the loss.
     dtype: the TensorFlow dtype to use for calculations.
     fine_tune: If True only train the dense layers(final layers).
+    label_smoothing: If greater than 0 then smooth the labels.
 
   Returns:
     EstimatorSpec parameterized according to the input params and the
@@ -344,8 +400,14 @@ def resnet_model_fn(features, labels, mode, model_class,
         })
 
   # Calculate loss, which includes softmax cross entropy and L2 regularization.
-  cross_entropy = tf.compat.v1.losses.sparse_softmax_cross_entropy(
-      logits=logits, labels=labels)
+  if label_smoothing != 0.0:
+    one_hot_labels = tf.one_hot(labels, 1001)
+    cross_entropy = tf.losses.softmax_cross_entropy(
+        logits=logits, onehot_labels=one_hot_labels,
+        label_smoothing=label_smoothing)
+  else:
+    cross_entropy = tf.compat.v1.losses.sparse_softmax_cross_entropy(
+        logits=logits, labels=labels)
 
   # Create a tensor named cross_entropy for logging purposes.
   tf.identity(cross_entropy, name='cross_entropy')
@@ -379,10 +441,17 @@ def resnet_model_fn(features, labels, mode, model_class,
     tf.identity(learning_rate, name='learning_rate')
     tf.compat.v1.summary.scalar('learning_rate', learning_rate)
 
-    optimizer = tf.compat.v1.train.MomentumOptimizer(
-        learning_rate=learning_rate,
-        momentum=momentum
-    )
+    if flags.FLAGS.enable_lars:
+      optimizer = tf.contrib.opt.LARSOptimizer(
+          learning_rate,
+          momentum=momentum,
+          weight_decay=weight_decay,
+          skip_list=['batch_normalization', 'bias'])
+    else:
+      optimizer = tf.compat.v1.train.MomentumOptimizer(
+          learning_rate=learning_rate,
+          momentum=momentum
+      )
 
     def _dense_grad_filter(gvs):
       """Only apply gradient updates to the final layer.
@@ -468,6 +537,10 @@ def resnet_main(
   if flags_obj.tf_gpu_thread_mode:
     override_flags_and_set_envars_for_gpu_thread_pool(flags_obj)
 
+  # Configures cluster spec for distribution strategy.
+  num_workers = distribution_utils.configure_cluster(flags_obj.worker_hosts,
+                                                     flags_obj.task_index)
+
   # Creates session config. allow_soft_placement = True, is required for
   # multi-GPU and is not harmful for other modes.
   session_config = tf.compat.v1.ConfigProto(
@@ -478,6 +551,7 @@ def resnet_main(
   distribution_strategy = distribution_utils.get_distribution_strategy(
       distribution_strategy=flags_obj.distribution_strategy,
       num_gpus=flags_core.get_num_gpus(flags_obj),
+      num_workers=num_workers,
       all_reduce_alg=flags_obj.all_reduce_alg)
 
   # Creates a `RunConfig` that checkpoints every 24 hours which essentially
@@ -485,7 +559,8 @@ def resnet_main(
   run_config = tf.estimator.RunConfig(
       train_distribute=distribution_strategy,
       session_config=session_config,
-      save_checkpoints_secs=60*60*24)
+      save_checkpoints_secs=60*60*24,
+      save_checkpoints_steps=None)
 
   # Initializes model with all but the dense layer from pretrained ResNet.
   if flags_obj.pretrained_model_checkpoint_path is not None:
@@ -504,7 +579,8 @@ def resnet_main(
           'resnet_version': int(flags_obj.resnet_version),
           'loss_scale': flags_core.get_loss_scale(flags_obj),
           'dtype': flags_core.get_tf_dtype(flags_obj),
-          'fine_tune': flags_obj.fine_tune
+          'fine_tune': flags_obj.fine_tune,
+          'num_workers': num_workers,
       })
 
   run_params = {
@@ -514,6 +590,7 @@ def resnet_main(
       'resnet_version': flags_obj.resnet_version,
       'synthetic_data': flags_obj.use_synthetic_data,
       'train_epochs': flags_obj.train_epochs,
+      'num_workers': num_workers,
   }
   if flags_obj.use_synthetic_data:
     dataset_name = dataset_name + '-synthetic'
@@ -527,7 +604,7 @@ def resnet_main(
       model_dir=flags_obj.model_dir,
       batch_size=flags_obj.batch_size)
 
-  def input_fn_train(num_epochs):
+  def input_fn_train(num_epochs, input_context=None):
     return input_function(
         is_training=True,
         data_dir=flags_obj.data_dir,
@@ -536,7 +613,8 @@ def resnet_main(
         num_epochs=num_epochs,
         dtype=flags_core.get_tf_dtype(flags_obj),
         datasets_num_private_threads=flags_obj.datasets_num_private_threads,
-        num_parallel_batches=flags_obj.datasets_num_parallel_batches)
+        num_parallel_batches=flags_obj.datasets_num_parallel_batches,
+        input_context=input_context)
 
   def input_fn_eval():
     return input_function(
@@ -547,46 +625,71 @@ def resnet_main(
         num_epochs=1,
         dtype=flags_core.get_tf_dtype(flags_obj))
 
-  if flags_obj.eval_only or not flags_obj.train_epochs:
-    # If --eval_only is set, perform a single loop with zero train epochs.
-    schedule, n_loops = [0], 1
-  else:
-    # Compute the number of times to loop while training. All but the last
-    # pass will train for `epochs_between_evals` epochs, while the last will
-    # train for the number needed to reach `training_epochs`. For instance if
-    #   train_epochs = 25 and epochs_between_evals = 10
-    # schedule will be set to [10, 10, 5]. That is to say, the loop will:
-    #   Train for 10 epochs and then evaluate.
-    #   Train for another 10 epochs and then evaluate.
-    #   Train for a final 5 epochs (to reach 25 epochs) and then evaluate.
-    n_loops = math.ceil(flags_obj.train_epochs / flags_obj.epochs_between_evals)
-    schedule = [flags_obj.epochs_between_evals for _ in range(int(n_loops))]
-    schedule[-1] = flags_obj.train_epochs - sum(schedule[:-1])  # over counting.
+  train_epochs = (0 if flags_obj.eval_only or not flags_obj.train_epochs else
+                  flags_obj.train_epochs)
 
-  for cycle_index, num_train_epochs in enumerate(schedule):
-    tf.compat.v1.logging.info('Starting cycle: %d/%d', cycle_index,
-                              int(n_loops))
-
-    if num_train_epochs:
-      classifier.train(input_fn=lambda: input_fn_train(num_train_epochs),
-                       hooks=train_hooks, max_steps=flags_obj.max_train_steps)
-
-    tf.compat.v1.logging.info('Starting to evaluate.')
-
-    # flags_obj.max_train_steps is generally associated with testing and
-    # profiling. As a result it is frequently called with synthetic data, which
-    # will iterate forever. Passing steps=flags_obj.max_train_steps allows the
-    # eval (which is generally unimportant in those circumstances) to terminate.
-    # Note that eval will run for max_train_steps each loop, regardless of the
-    # global_step count.
-    eval_results = classifier.evaluate(input_fn=input_fn_eval,
-                                       steps=flags_obj.max_train_steps)
-
+  use_train_and_evaluate = flags_obj.use_train_and_evaluate or (
+      distribution_strategy.__class__.__name__ in [
+          'CollectiveAllReduceStrategy', 'MultiWorkerMirroredStrategy'])
+  if use_train_and_evaluate:
+    train_spec = tf.estimator.TrainSpec(
+        input_fn=lambda input_context=None: input_fn_train(
+            train_epochs, input_context=input_context),
+        hooks=train_hooks,
+        max_steps=flags_obj.max_train_steps)
+    eval_spec = tf.estimator.EvalSpec(input_fn=input_fn_eval,
+                                      steps=flags_obj.max_train_steps)
+    tf.compat.v1.logging.info('Starting to train and evaluate.')
+    eval_results, _ = tf.estimator.train_and_evaluate(classifier, train_spec,
+                                                      eval_spec)
     benchmark_logger.log_evaluation_result(eval_results)
+  else:
+    if train_epochs == 0:
+      # If --eval_only is set, perform a single loop with zero train epochs.
+      schedule, n_loops = [0], 1
+    else:
+      # Compute the number of times to loop while training. All but the last
+      # pass will train for `epochs_between_evals` epochs, while the last will
+      # train for the number needed to reach `training_epochs`. For instance if
+      #   train_epochs = 25 and epochs_between_evals = 10
+      # schedule will be set to [10, 10, 5]. That is to say, the loop will:
+      #   Train for 10 epochs and then evaluate.
+      #   Train for another 10 epochs and then evaluate.
+      #   Train for a final 5 epochs (to reach 25 epochs) and then evaluate.
+      n_loops = math.ceil(train_epochs / flags_obj.epochs_between_evals)
+      schedule = [flags_obj.epochs_between_evals for _ in range(int(n_loops))]
+      schedule[-1] = train_epochs - sum(schedule[:-1])  # over counting.
 
-    if model_helpers.past_stop_threshold(
-        flags_obj.stop_threshold, eval_results['accuracy']):
-      break
+    for cycle_index, num_train_epochs in enumerate(schedule):
+      tf.compat.v1.logging.info('Starting cycle: %d/%d', cycle_index,
+                                int(n_loops))
+
+      if num_train_epochs:
+        # Since we are calling classifier.train immediately in each loop, the
+        # value of num_train_epochs in the lambda function will not be changed
+        # before it is used. So it is safe to ignore the pylint error here
+        # pylint: disable=cell-var-from-loop
+        classifier.train(
+            input_fn=lambda input_context=None: input_fn_train(
+                num_train_epochs, input_context=input_context),
+            hooks=train_hooks,
+            max_steps=flags_obj.max_train_steps)
+
+      # flags_obj.max_train_steps is generally associated with testing and
+      # profiling. As a result it is frequently called with synthetic data,
+      # which will iterate forever. Passing steps=flags_obj.max_train_steps
+      # allows the eval (which is generally unimportant in those circumstances)
+      # to terminate.  Note that eval will run for max_train_steps each loop,
+      # regardless of the global_step count.
+      tf.compat.v1.logging.info('Starting to evaluate.')
+      eval_results = classifier.evaluate(input_fn=input_fn_eval,
+                                         steps=flags_obj.max_train_steps)
+
+      benchmark_logger.log_evaluation_result(eval_results)
+
+      if model_helpers.past_stop_threshold(
+          flags_obj.stop_threshold, eval_results['accuracy']):
+        break
 
   if flags_obj.export_dir is not None:
     # Exports a saved model for the given classifier.
@@ -607,13 +710,14 @@ def resnet_main(
   return stats
 
 
-def define_resnet_flags(resnet_size_choices=None):
+def define_resnet_flags(resnet_size_choices=None, dynamic_loss_scale=False):
   """Add flags and validators for ResNet."""
   flags_core.define_base()
   flags_core.define_performance(num_parallel_calls=False,
                                 tf_gpu_thread_mode=True,
                                 datasets_num_private_threads=True,
-                                datasets_num_parallel_batches=True)
+                                datasets_num_parallel_batches=True,
+                                dynamic_loss_scale=dynamic_loss_scale)
   flags_core.define_image()
   flags_core.define_benchmark()
   flags.adopt_module_key_flags(flags_core)
@@ -645,6 +749,35 @@ def define_resnet_flags(resnet_size_choices=None):
           'the expense of image resize/cropping being done as part of model '
           'inference. Note, this flag only applies to ImageNet and cannot '
           'be used for CIFAR.'))
+  flags.DEFINE_boolean(
+      name='use_train_and_evaluate', default=False,
+      help=flags_core.help_wrap(
+          'If True, uses `tf.estimator.train_and_evaluate` for the training '
+          'and evaluation loop, instead of separate calls to `classifier.train '
+          'and `classifier.evaluate`, which is the default behavior.'))
+  flags.DEFINE_string(
+      name='worker_hosts', default=None,
+      help=flags_core.help_wrap(
+          'Comma-separated list of worker ip:port pairs for running '
+          'multi-worker models with DistributionStrategy.  The user would '
+          'start the program on each host with identical value for this flag.'))
+  flags.DEFINE_integer(
+      name='task_index', default=-1,
+      help=flags_core.help_wrap('If multi-worker training, the task_index of '
+                                'this worker.'))
+  flags.DEFINE_bool(
+      name='enable_lars', default=False,
+      help=flags_core.help_wrap(
+          'Enable LARS optimizer for large batch training.'))
+  flags.DEFINE_float(
+      name='label_smoothing', default=0.0,
+      help=flags_core.help_wrap(
+          'Label smoothing parameter used in the softmax_cross_entropy'))
+  flags.DEFINE_float(
+      name='weight_decay', default=1e-4,
+      help=flags_core.help_wrap(
+          'Weight decay coefficiant for l2 regularization.'))
+
   choice_kwargs = dict(
       name='resnet_size', short_name='rs', default='50',
       help=flags_core.help_wrap('The size of the ResNet model to use.'))
