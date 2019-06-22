@@ -13,7 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Common util functions and classes used by both keras cifar and imagenet."""
-
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -27,10 +26,9 @@ import numpy as np
 from absl import flags
 import tensorflow as tf
 
+from official.utils.flags import core as flags_core
 from official.utils.misc import keras_utils
 # pylint: disable=ungrouped-imports
-from tensorflow.core.protobuf import rewriter_config_pb2
-from tensorflow.python.eager import profiler
 from tensorflow.python.keras.optimizer_v2 import (gradient_descent as
                                                   gradient_descent_v2)
 
@@ -79,58 +77,71 @@ class LearningRateBatchScheduler(tf.keras.callbacks.Callback):
           'change learning rate to %s.', self.epochs, batch, lr)
 
 
-class ProfilerCallback(tf.keras.callbacks.Callback):
-  """Save profiles in specified step range to log directory."""
+class PiecewiseConstantDecayWithWarmup(
+    tf.keras.optimizers.schedules.LearningRateSchedule):
+  """Piecewise constant decay with warmup schedule."""
 
-  def __init__(self, log_dir, start_step, stop_step):
-    super(ProfilerCallback, self).__init__()
-    self.log_dir = log_dir
-    self.start_step = start_step
-    self.stop_step = stop_step
+  def __init__(self, batch_size, epoch_size, warmup_epochs, boundaries,
+               multipliers, compute_lr_on_cpu=True, name=None):
+    super(PiecewiseConstantDecayWithWarmup, self).__init__()
+    if len(boundaries) != len(multipliers) - 1:
+      raise ValueError('The length of boundaries must be 1 less than the '
+                       'length of multipliers')
 
-  def on_batch_begin(self, batch, logs=None):
-    if batch == self.start_step:
-      profiler.start()
-      tf.compat.v1.logging.info('Profiler started at Step %s', self.start_step)
+    base_lr_batch_size = 256
+    num_batches_per_epoch = epoch_size // batch_size
 
-  def on_batch_end(self, batch, logs=None):
-    if batch == self.stop_step:
-      results = profiler.stop()
-      profiler.save(self.log_dir, results)
-      tf.compat.v1.logging.info(
-          'Profiler saved profiles for steps between %s and %s to %s',
-          self.start_step, self.stop_step, self.log_dir)
+    self.rescaled_lr = BASE_LEARNING_RATE * batch_size / base_lr_batch_size
+    self.step_boundaries = [float(num_batches_per_epoch) * x
+                            for x in boundaries]
+    self.lr_values = [self.rescaled_lr * m for m in multipliers]
+    self.warmup_steps = warmup_epochs * num_batches_per_epoch
+    self.compute_lr_on_cpu = compute_lr_on_cpu
+    self.name = name
 
+    self.learning_rate_ops_cache = {}
 
-def get_config_proto_v1():
-  """Return config proto according to flag settings, or None to use default."""
-  config = None
-  if FLAGS.enable_xla:
-    # TODO(haoyuzhang): Remove this monkey patch when XLA OOM issue is fixed.
-    _monkey_patch_org_assert_broadcastable()
+  def __call__(self, step):
+    if tf.executing_eagerly():
+      return self._get_learning_rate(step)
 
-    config = tf.compat.v1.ConfigProto()
-    config.graph_options.optimizer_options.global_jit_level = (
-        tf.OptimizerOptions.ON_2)
-    # Disable PinToHostOptimizer in grappler when enabling XLA because it causes
-    # OOM and performance regression.
-    config.graph_options.rewrite_options.pin_to_host_optimization = (
-        rewriter_config_pb2.RewriterConfig.OFF)
-  return config
+    # In an eager function or graph, the current implementation of optimizer
+    # repeatedly call and thus create ops for the learning rate schedule. To
+    # avoid this, we cache the ops if not executing eagerly.
+    graph = tf.compat.v1.get_default_graph()
+    if graph not in self.learning_rate_ops_cache:
+      if self.compute_lr_on_cpu:
+        with tf.device('/device:CPU:0'):
+          self.learning_rate_ops_cache[graph] = self._get_learning_rate(step)
+      else:
+        self.learning_rate_ops_cache[graph] = self._get_learning_rate(step)
+    return self.learning_rate_ops_cache[graph]
 
+  def _get_learning_rate(self, step):
+    """Compute learning rate at given step."""
+    with tf.compat.v1.name_scope(self.name, 'PiecewiseConstantDecayWithWarmup',
+                                 [self.rescaled_lr, self.step_boundaries,
+                                  self.lr_values, self.warmup_steps,
+                                  self.compute_lr_on_cpu]):
+      def warmup_lr(step):
+        return self.rescaled_lr * (
+            tf.cast(step, tf.float32) / tf.cast(self.warmup_steps, tf.float32))
+      def piecewise_lr(step):
+        return tf.compat.v1.train.piecewise_constant(
+            step, self.step_boundaries, self.lr_values)
+      return tf.cond(step < self.warmup_steps,
+                     lambda: warmup_lr(step),
+                     lambda: piecewise_lr(step))
 
-def set_config_v2():
-  """Config eager context according to flag values using TF 2.0 API."""
-  if FLAGS.enable_xla:
-    # TODO(haoyuzhang): Remove this monkey patch when XLA OOM issue is fixed.
-    _monkey_patch_org_assert_broadcastable()
-
-    tf.config.optimizer.set_jit(True)
-    # Disable PinToHostOptimizer in grappler when enabling XLA because it
-    # causes OOM and performance regression.
-    tf.config.optimizer.set_experimental_options(
-        {"pin_to_host_optimization": False}
-    )
+  def get_config(self):
+    return {
+        'rescaled_lr': self.rescaled_lr,
+        'step_boundaries': self.step_boundaries,
+        'lr_values': self.lr_values,
+        'warmup_steps': self.warmup_steps,
+        'compute_lr_on_cpu': self.compute_lr_on_cpu,
+        'name': self.name
+    }
 
 
 def set_gpu_thread_mode_and_count(flags_obj):
@@ -150,28 +161,32 @@ def set_gpu_thread_mode_and_count(flags_obj):
   # Limit data preprocessing threadpool to CPU cores minus number of total GPU
   # private threads and memory copy threads.
   total_gpu_thread_count = per_gpu_thread_count * flags_obj.num_gpus
-  num_mem_copy_threads = flags_obj.num_gpus
+  num_runtime_threads = flags_obj.num_gpus
   if not flags_obj.datasets_num_private_threads:
-    flags_obj.datasets_num_private_threads = (cpu_count - total_gpu_thread_count
-                                              - num_mem_copy_threads)
+    flags_obj.datasets_num_private_threads = min(
+        cpu_count - total_gpu_thread_count - num_runtime_threads,
+        flags_obj.num_gpus * 8)
     tf.compat.v1.logging.info('Set datasets_num_private_threads to %s',
                               flags_obj.datasets_num_private_threads)
 
 
-def get_optimizer():
+def get_optimizer(learning_rate=0.1):
   """Returns optimizer to use."""
   # The learning_rate is overwritten at the beginning of each step by callback.
-  return gradient_descent_v2.SGD(learning_rate=0.1, momentum=0.9)
+  return gradient_descent_v2.SGD(learning_rate=learning_rate, momentum=0.9)
 
 
 def get_callbacks(learning_rate_schedule_fn, num_images):
   """Returns common callbacks."""
   time_callback = keras_utils.TimeHistory(FLAGS.batch_size, FLAGS.log_steps)
-  lr_callback = LearningRateBatchScheduler(
-      learning_rate_schedule_fn,
-      batch_size=FLAGS.batch_size,
-      num_images=num_images)
-  callbacks = [time_callback, lr_callback]
+  callbacks = [time_callback]
+
+  if not FLAGS.use_tensor_lr:
+    lr_callback = LearningRateBatchScheduler(
+        learning_rate_schedule_fn,
+        batch_size=FLAGS.batch_size,
+        num_images=num_images)
+    callbacks.append(lr_callback)
 
   if FLAGS.enable_tensorboard:
     tensorboard_callback = tf.keras.callbacks.TensorBoard(
@@ -179,35 +194,13 @@ def get_callbacks(learning_rate_schedule_fn, num_images):
     callbacks.append(tensorboard_callback)
 
   if FLAGS.profile_steps:
-    profiler_callback = get_profiler_callback()
+    profiler_callback = keras_utils.get_profiler_callback(
+        FLAGS.model_dir,
+        FLAGS.profile_steps,
+        FLAGS.enable_tensorboard)
     callbacks.append(profiler_callback)
 
   return callbacks
-
-
-def get_profiler_callback():
-  """Validate profile_steps flag value and return profiler callback."""
-  profile_steps_error_message = (
-      'profile_steps must be a comma separated pair of positive integers, '
-      'specifying the first and last steps to be profiled.'
-  )
-  try:
-    profile_steps = [int(i) for i in FLAGS.profile_steps.split(',')]
-  except ValueError:
-    raise ValueError(profile_steps_error_message)
-  if len(profile_steps) != 2:
-    raise ValueError(profile_steps_error_message)
-  start_step, stop_step = profile_steps
-  if start_step < 0 or start_step > stop_step:
-    raise ValueError(profile_steps_error_message)
-  if FLAGS.enable_tensorboard:
-    tf.compat.v1.logging.warn(
-        'Both TensorBoard and profiler callbacks are used. Note that the '
-        'TensorBoard callback profiles the 2nd step (unless otherwise '
-        'specified). Please make sure the steps profiled by the two callbacks '
-        'do not overlap.')
-
-  return ProfilerCallback(FLAGS.model_dir, start_step, stop_step)
 
 
 def build_stats(history, eval_output, callbacks):
@@ -256,17 +249,37 @@ def build_stats(history, eval_output, callbacks):
   return stats
 
 
-def define_keras_flags():
+def define_keras_flags(dynamic_loss_scale=True):
   """Define flags for Keras models."""
+  flags_core.define_base(run_eagerly=True)
+  flags_core.define_performance(num_parallel_calls=False,
+                                tf_gpu_thread_mode=True,
+                                datasets_num_private_threads=True,
+                                dynamic_loss_scale=dynamic_loss_scale,
+                                loss_scale=True,
+                                tf_data_experimental_slack=True,
+                                enable_xla=True)
+  flags_core.define_image()
+  flags_core.define_benchmark()
+  flags.adopt_module_key_flags(flags_core)
 
   flags.DEFINE_boolean(name='enable_eager', default=False, help='Enable eager?')
   flags.DEFINE_boolean(name='skip_eval', default=False, help='Skip evaluation?')
+  # TODO(b/135607288): Remove this flag once we understand the root cause of
+  # slowdown when setting the learning phase in Keras backend.
+  flags.DEFINE_boolean(
+      name='set_learning_phase_to_train', default=True,
+      help='If skip eval, also set Keras learning phase to 1 (training).')
+  flags.DEFINE_boolean(
+      name='explicit_gpu_placement', default=False,
+      help='If not using distribution strategy, explicitly set device scope '
+      'for the Keras training loop.')
   flags.DEFINE_boolean(name='use_trivial_model', default=False,
                        help='Whether to use a trivial Keras model.')
-  flags.DEFINE_boolean(
-      name='enable_xla', default=False,
-      help='Whether to enable XLA auto jit compilation. This is still an '
-      'experimental feature, and is not yet effective with TF 2.0.')
+  flags.DEFINE_boolean(name='report_accuracy_metrics', default=True,
+                       help='Report metrics during training and evaluation.')
+  flags.DEFINE_boolean(name='use_tensor_lr', default=False,
+                       help='Use learning rate tensor instead of a callback.')
   flags.DEFINE_boolean(
       name='enable_tensorboard', default=False,
       help='Whether to enable Tensorboard callback.')
@@ -283,7 +296,32 @@ def define_keras_flags():
       'triggers the profiler to process 3 steps, starting from the 2nd step. '
       'Note that profiler has a non-trivial performance overhead, and the '
       'output file can be gigantic if profiling many steps.')
-
+  flags.DEFINE_boolean(
+      name='data_delay_prefetch', default=False,
+      help='Add a small delay in tf.data prefetch to prioritize memory copy of '
+      'other tensors over the data minibatch for the (T+1)th step. It should '
+      'help improve performance using EagerIterator and function. The codepath '
+      'when enabling this feature is experimental and will be removed once the '
+      'corresponding performance features are fully supported in TensorFlow.')
+  flags.DEFINE_boolean(
+      name='batchnorm_spatial_persistent', default=True,
+      help='Enable the spacial persistent mode for CuDNN batch norm kernel.')
+  flags.DEFINE_boolean(
+      name='clone_model_in_keras_dist_strat', default=None,
+      help='If False, then the experimental code path is used that doesn\'t '
+           'clone models for distribution.')
+  flags.DEFINE_boolean(
+      name='enable_get_next_as_optional', default=False,
+      help='Enable get_next_as_optional behavior in DistributedIterator.')
+  # TODO(b/76028325): Remove when generic layout optimizer is ready.
+  flags.DEFINE_boolean(
+      name='enable_grappler_layout_optimizer',
+      default=True,
+      help='Enable Grappler layout optimizer. Currently Grappler can '
+           'de-optimize fp16 graphs byt forcing NCHW layout for all '
+           'convolutions and batch normalizations, and this flag allows to '
+           'disable it.'
+  )
 
 def get_synth_input_fn(height, width, num_channels, num_classes,
                        dtype=tf.float32, drop_remainder=True):
@@ -336,29 +374,45 @@ def get_synth_input_fn(height, width, num_channels, num_classes,
   return input_fn
 
 
-def is_v2_0():
-  """Returns true if using tf 2.0."""
-  return tf.__version__.startswith('2')
+def data_delay_prefetch():
+  """Use unstable code for perf tuning purposes."""
+  if not FLAGS.use_synthetic_data:
+    _monkey_patch_org_create_device_dataset()
 
 
-def _monkey_patch_org_assert_broadcastable():
-  """Monkey-patch `assert_broadcast` op to avoid OOM when enabling XLA."""
-  def no_op_assert_broadcastable(weights, values):
-    del weights, values
-    tf.compat.v1.logging.info(
-        'Using monkey-patched version of assert_broadcastable op, which always '
-        'returns an no_op. It should be removed after XLA OOM issue is fixed.')
-    return tf.constant([], dtype=tf.float32)
+def set_cudnn_batchnorm_mode():
+  """Set CuDNN batchnorm mode for better performance.
 
-  from tensorflow.python.ops import weights_broadcast_ops  # pylint: disable=g-import-not-at-top
-  if not hasattr(weights_broadcast_ops, 'org_assert_broadcastable'):
-    weights_broadcast_ops.org_assert_broadcastable = (
-        weights_broadcast_ops.assert_broadcastable)
-  weights_broadcast_ops.assert_broadcastable = no_op_assert_broadcastable
+     Note: Spatial Persistent mode may lead to accuracy losses for certain
+     models.
+  """
+  if FLAGS.batchnorm_spatial_persistent:
+    os.environ['TF_USE_CUDNN_BATCHNORM_SPATIAL_PERSISTENT'] = '1'
+  else:
+    os.environ.pop('TF_USE_CUDNN_BATCHNORM_SPATIAL_PERSISTENT', None)
 
 
-def _undo_monkey_patch_org_assert_broadcastable():
-  from tensorflow.python.ops import weights_broadcast_ops  # pylint: disable=g-import-not-at-top
-  if hasattr(weights_broadcast_ops, 'org_assert_broadcastable'):
-    weights_broadcast_ops.assert_broadcastable = (
-        weights_broadcast_ops.org_assert_broadcastable)
+# TODO(haoyuzhang): remove this monkey patch when the "prefetch with slack"
+# feature is available in tf.data.
+def _monkey_patch_org_create_device_dataset():
+  """Monkey-patch `_create_device_dataset` method with delayed prefetch."""
+
+  import ast  # pylint: disable=g-import-not-at-top
+  import inspect  # pylint: disable=g-import-not-at-top
+  from tensorflow.python.data.ops import multi_device_iterator_ops  # pylint: disable=g-import-not-at-top
+
+  tf.compat.v1.logging.info(
+      'Using monkey-patched version of MultiDeviceIterator. It should be '
+      'removed when the prefetch with slack feature is implemented in tf.data.')
+  cls_multi_device_iterator = ast.parse(
+      inspect.getsource(multi_device_iterator_ops.MultiDeviceIterator))
+  org_create_device_dataset_code = inspect.getsource(
+      multi_device_iterator_ops.MultiDeviceIterator._create_device_dataset)  # pylint: disable=protected-access
+  code_lines = org_create_device_dataset_code.split('\n')
+  # Insert in reverse order to avoid line number shift by previous insertions
+  code_lines.insert(5, '      ds = ds.apply(sleep_ops.sleep(11000))')  # 11ms
+  code_lines.insert(2, '    from tensorflow.python.data.experimental.ops import sleep as sleep_ops')  # pylint: disable=line-too-long
+  patched_code = '\n'.join(line[2:] for line in code_lines)
+  cls_multi_device_iterator.body[0].body[2] = ast.parse(patched_code).body[0]
+  exec(compile(cls_multi_device_iterator, '<string>', 'exec'),  # pylint: disable=exec-used
+       multi_device_iterator_ops.__dict__)

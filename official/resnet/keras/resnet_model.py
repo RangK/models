@@ -208,8 +208,7 @@ def resnet50(num_classes, dtype='float32', batch_size=None):
                                 epsilon=BATCH_NORM_EPSILON,
                                 name='bn_conv1')(x)
   x = layers.Activation('relu')(x)
-  x = layers.ZeroPadding2D(padding=(1, 1), name='pool1_pad')(x)
-  x = layers.MaxPooling2D((3, 3), strides=(2, 2))(x)
+  x = layers.MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
 
   x = conv_block(x, 3, [64, 64, 256], stage=2, block='a', strides=(1, 1))
   x = identity_block(x, 3, [64, 64, 256], stage=2, block='b')
@@ -231,7 +230,8 @@ def resnet50(num_classes, dtype='float32', batch_size=None):
   x = identity_block(x, 3, [512, 512, 2048], stage=5, block='b')
   x = identity_block(x, 3, [512, 512, 2048], stage=5, block='c')
 
-  x = layers.GlobalAveragePooling2D(name='avg_pool')(x)
+  rm_axes = [1, 2] if backend.image_data_format() == 'channels_last' else [2, 3]
+  x = layers.Lambda(lambda x: backend.mean(x, rm_axes), name='reduce_mean')(x)
   x = layers.Dense(
       num_classes,
       kernel_regularizer=regularizers.l2(L2_WEIGHT_DECAY),
