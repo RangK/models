@@ -41,6 +41,8 @@ import PIL.Image
 
 from pycocotools import mask
 import tensorflow as tf
+from enum import Enum
+from imgaug import augmenters as iaa
 
 from object_detection.dataset_tools import tf_record_creation_util
 from object_detection.utils import dataset_util
@@ -50,6 +52,7 @@ flags = tf.app.flags
 tf.flags.DEFINE_boolean('include_masks', False,
                         'Whether to include instance segmentations masks '
                         '(PNG encoded) in the result. default: False.')
+tf.flags.DEFINE_integer('aug_mode', 0, 'Augmentation mode [normal : 0, gaussian noise : 1, rotation : 2]')
 tf.flags.DEFINE_string('train_image_dir', '',
                        'Training image directory.')
 tf.flags.DEFINE_string('val_image_dir', '',
@@ -67,6 +70,12 @@ tf.flags.DEFINE_string('output_dir', '/tmp/', 'Output data directory.')
 FLAGS = flags.FLAGS
 
 tf.logging.set_verbosity(tf.logging.INFO)
+
+
+class AugmentationMode(Enum):
+    normal = 0
+    gaussian_noise = 1
+    rotation = 2
 
 
 def get_directory_name(category_name):
@@ -92,10 +101,21 @@ def get_directory_name(category_name):
     raise IndexError("category name({}) is not exist in the category list".format(category_name))
 
 
+def augment_image(image, aug_mode):
+    if aug_mode == AugmentationMode.gaussian_noise.value:
+        augmenter = iaa.AdditiveGaussianNoise(loc=0, scale=(0.0, 0.05 * 255), per_channel=0.5)
+    else:
+        # TODO : Rotate
+        augmenter = None
+
+    return augmenter.augment_image(np.array(image))
+
+
 def create_tf_example(image,
                       annotations_list,
                       image_dir,
                       category_index,
+                      aug_mode,
                       include_masks=False):
     image_height = image['height']
     image_width = image['width']
@@ -103,8 +123,15 @@ def create_tf_example(image,
     image_id = image['id']
 
     full_path = os.path.join(image_dir, filename)
-    with tf.gfile.GFile(full_path, 'rb') as fid:
-        encoded_jpg = fid.read()
+    if aug_mode == AugmentationMode.normal.value:
+        with tf.gfile.GFile(full_path, 'rb') as fid:
+            encoded_jpg = fid.read()
+    else:
+        tmp_image_path = './augment_image.jpg'
+        np_image = augment_image(PIL.Image.open(full_path), aug_mode)
+        PIL.Image.fromarray(np_image).save(tmp_image_path)
+        with tf.gfile.GFile(tmp_image_path, 'rb') as fid:
+            encoded_jpg = fid.read()
 
     key = hashlib.sha256(encoded_jpg).hexdigest()
 
@@ -120,23 +147,27 @@ def create_tf_example(image,
         (x, y, r, b) = tuple(object_annotations['bbox'])
         #TODO : checking x,y,r,b data is valid
 
-        xm = float(x) / image_width
-        xx = float(r) / image_width
-        ym = float(y) / image_width
-        yx = float(b) / image_height
-
-        if xm == 0 or xx == 0 or ym == 0 or yx == 0:
-            print("bbox : {}, {}, {}, {}".format(xm, xx, ym, yx))
-        if xm >= 1 or xx >= 1 or ym >= 1 or yx >= 1:
-            print("bbox : {}, {}, {}, {}".format(xm, xx, ym, yx))
+        # xm = float(x) / image_width
+        # xx = float(r) / image_width
+        # ym = float(y) / image_width
+        # yx = float(b) / image_height
 
         xmin.append(float(x) / image_width)
         xmax.append(float(r) / image_width)
         ymin.append(float(y) / image_height)
         ymax.append(float(b) / image_height)
+
         category_id = int(object_annotations['category_id'])
+        category_name = category_index[category_id]['name'].encode('utf8')
+
+        # print("{} bbox length : {}".format(filename, len(xmax)))
+        # print("bbox : {}, {}, {}, {}".format(xm, xx, ym, yx))
+        # if xm == 0 or xx == 0 or ym == 0 or yx == 0:
+        # if xm >= 1 or xx >= 1 or ym >= 1 or yx >= 1:
+        # print("bbox : {}, {}, {}, {}".format(xm, xx, ym, yx))
+
         category_ids.append(category_id)
-        category_names.append(category_index[category_id]['name'].encode('utf8'))
+        category_names.append(category_name)
 
         if include_masks:
             run_len_encoding = mask.frPyObjects(object_annotations['segmentation'],
@@ -189,7 +220,8 @@ def create_tf_example(image,
     return key, example, num_annotations_skipped
 
 
-def _create_tf_record_from_wfs_annotations(annotations_file, image_root_dir, output_path, include_masks, num_shards):
+def _create_tf_record_from_wfs_annotations(annotations_file, image_root_dir, output_path,
+                                           include_masks, num_shards, aug_mode):
     with contextlib2.ExitStack() as tf_record_close_stack, tf.gfile.GFile(annotations_file, 'r') as fid:
         output_tfrecords = tf_record_creation_util.open_sharded_output_tfrecords(
             tf_record_close_stack, output_path, num_shards)
@@ -226,7 +258,7 @@ def _create_tf_record_from_wfs_annotations(annotations_file, image_root_dir, out
             image_dir = os.path.join(image_root_dir, category_folder)
 
             _, tf_example, num_annotations_skipped = create_tf_example(
-                image, annotations_list, image_dir, category_index, include_masks)
+                image, annotations_list, image_dir, category_index, include_masks, aug_mode)
             total_num_annotations_skipped += num_annotations_skipped
             shard_idx = idx % num_shards
             output_tfrecords[shard_idx].write(tf_example.SerializeToString())
@@ -254,15 +286,17 @@ def main(_):
         FLAGS.train_image_dir,
         train_output_path,
         FLAGS.include_masks,
-        num_shards=100)
+        num_shards=100,
+        aug_mode=FLAGS.aug_mode)
 
     _create_tf_record_from_wfs_annotations(
         FLAGS.val_annotations_file,
         FLAGS.train_image_dir,
         val_output_path,
         FLAGS.include_masks,
-        num_shards=10)
-    #
+        num_shards=10,
+        aug_mode=AugmentationMode.normal.value)
+
     # _create_tf_record_from_wfs_annotations(
     #     FLAGS.testdev_annotations_file,
     #     FLAGS.test_image_dir,

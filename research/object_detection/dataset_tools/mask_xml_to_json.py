@@ -1,6 +1,7 @@
 import os
 import glob
 import json
+from enum import Enum
 import xml.etree.ElementTree as ET
 from utils.label_map_util import get_label_map_dict
 
