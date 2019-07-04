@@ -70,6 +70,13 @@ tf.logging.set_verbosity(tf.logging.INFO)
 
 
 def get_directory_name(category_name):
+    if category_name == 'nut':
+        return "augments_full"
+    elif category_name == 'defect':
+        return "augments_full"
+    elif category_name == 'box':
+        return "augments_full"
+    """
     if category_name == 'p1':
         return "ACTP1C"
     elif category_name == 'p6':
@@ -88,6 +95,7 @@ def get_directory_name(category_name):
         return "ACTT2C"
     elif category_name == 'v1':
         return "ACTV1R"
+    """
 
     raise IndexError("category name({}) is not exist in the category list".format(category_name))
 
@@ -103,6 +111,10 @@ def create_tf_example(image,
     image_id = image['id']
 
     full_path = os.path.join(image_dir, filename)
+    if not os.path.exists(full_path):
+        print("not found image : {}".format(full_path))
+        return None, None, None
+
     with tf.gfile.GFile(full_path, 'rb') as fid:
         encoded_jpg = fid.read()
 
@@ -217,19 +229,29 @@ def _create_tf_record_from_wfs_annotations(annotations_file, image_root_dir, out
                         missing_annotation_count)
 
         total_num_annotations_skipped = 0
+        not_found_images = 0
         for idx, image in enumerate(images):
-            if idx % 100 == 0:
-                tf.logging.info('On image %d of %d', idx, len(images))
+            # if idx % 100 == 0:
+            #     tf.logging.info('On image %d of %d / Not found %d', idx, len(images), not_found_images)
+            # print('On image {} of {} / Not found {}'.format(idx + 1, len(images), not_found_images), end='\r')
+
             annotations_list = annotations_index[image['id']]
             category_name = category_index[annotations_list[0]['category_id']]['name']
             category_folder = get_directory_name(category_name)
             image_dir = os.path.join(image_root_dir, category_folder)
 
-            _, tf_example, num_annotations_skipped = create_tf_example(
+            result, tf_example, num_annotations_skipped = create_tf_example(
                 image, annotations_list, image_dir, category_index, include_masks)
+
+            if result is None:
+                not_found_images += 1
+                continue
+
             total_num_annotations_skipped += num_annotations_skipped
             shard_idx = idx % num_shards
             output_tfrecords[shard_idx].write(tf_example.SerializeToString())
+
+        print("\n")
         tf.logging.info('Finished writing, skipped %d annotations.',
                         total_num_annotations_skipped)
 
@@ -245,8 +267,8 @@ def main(_):
     if not tf.gfile.IsDirectory(FLAGS.output_dir):
         tf.gfile.MakeDirs(FLAGS.output_dir)
         
-    train_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_train.record')
-    val_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_val.record')
+    train_output_path = os.path.join(FLAGS.output_dir, 'ess_nut_aug_train.record')
+    val_output_path = os.path.join(FLAGS.output_dir, 'ess_nut_aug_val.record')
     # testdev_output_path = os.path.join(FLAGS.output_dir, 'wfs_mask_testdev.record')
 
     _create_tf_record_from_wfs_annotations(
@@ -256,12 +278,12 @@ def main(_):
         FLAGS.include_masks,
         num_shards=100)
 
-    _create_tf_record_from_wfs_annotations(
-        FLAGS.val_annotations_file,
-        FLAGS.train_image_dir,
-        val_output_path,
-        FLAGS.include_masks,
-        num_shards=10)
+    # _create_tf_record_from_wfs_annotations(
+    #     FLAGS.val_annotations_file,
+    #     FLAGS.train_image_dir,
+    #     val_output_path,
+    #     FLAGS.include_masks,
+    #     num_shards=10)
     #
     # _create_tf_record_from_wfs_annotations(
     #     FLAGS.testdev_annotations_file,

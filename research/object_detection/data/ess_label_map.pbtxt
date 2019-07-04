@@ -1,0 +1,16 @@
+item {
+  id: 1
+  name: 'nut'
+}
+item {
+  id: 2
+  name: 'defect'
+}
+item {
+  id: 3
+  name: 'box'
+}
+item {
+  id: 4
+  name: 'empty'
+}
